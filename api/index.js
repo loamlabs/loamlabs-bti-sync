@@ -1,142 +1,71 @@
-// Import the necessary tools (libraries)
+// --- DIAGNOSTIC SCRIPT ---
 const shopifyApi = require('@shopify/shopify-api');
 require('@shopify/shopify-api/adapters/node');
-const { Resend } = require('resend');
-const { parse } = require('csv-parse/sync');
 
 // --- CONFIGURATION ---
 const {
   SHOPIFY_STORE_DOMAIN,
   SHOPIFY_ADMIN_API_TOKEN,
-  BTI_USERNAME,
-  BTI_PASSWORD,
-  RESEND_API_KEY,
-  REPORT_EMAIL_TO,
 } = process.env;
 
 // Initialize clients
 const shopify = shopifyApi.shopifyApi({
   apiKey: 'temp_key', apiSecretKey: 'temp_secret',
-  scopes: ['read_products', 'write_products'],
+  scopes: ['read_products'],
   hostName: SHOPIFY_STORE_DOMAIN.replace('https://', ''),
   apiVersion: shopifyApi.LATEST_API_VERSION,
   isEmbeddedApp: false, isCustomStoreApp: true,
   adminApiAccessToken: SHOPIFY_ADMIN_API_TOKEN,
 });
-const resend = new Resend(RESEND_API_KEY);
-const BTI_INVENTORY_URL = 'https://www.bti-usa.com/inventory';
 
-// The main sync function
+// --- The main diagnostic function ---
 module.exports = async (req, res) => {
-    console.log("BTI inventory sync function triggered...");
-    const log = ["BTI Sync Started..."];
-    let status = 200;
-    let message = "Sync completed successfully.";
-    const changesMade = [];
+    console.log("BTI Sync DIAGNOSTIC MODE triggered...");
+    const log = ["Diagnostic Started..."];
+
+    // ----- EDIT THIS LINE WITH THE BTI PART NUMBER OF YOUR TEST VARIANT -----
+    const BTI_PART_NUMBER_TO_FIND = "1K000000";
 
     try {
-        // 1. Fetch and Parse BTI Inventory
-        log.push("Fetching inventory from BTI...");
-        const btiCredentials = Buffer.from(`${BTI_USERNAME}:${BTI_PASSWORD}`).toString('base64');
-        const btiResponse = await fetch(BTI_INVENTORY_URL, { headers: { 'Authorization': `Basic ${btiCredentials}` } });
-        if (!btiResponse.ok) throw new Error(`BTI connection failed: ${btiResponse.status}`);
-        const csvText = await btiResponse.text();
-        const records = parse(csvText, { columns: true, skip_empty_lines: true });
-        const btiStockMap = new Map(records.map(r => [r.id, parseInt(r.available, 10) || 0]));
-        log.push(`Successfully parsed ${btiStockMap.size} items from BTI feed.`);
-
-        // 2. Fetch all Shopify variants that are linked to BTI
-        log.push("Fetching all Shopify variants with a BTI part number...");
+        log.push("Fetching ALL Shopify variants to find our target...");
         const shopifyVariants = await getAllShopifyVariants();
-        log.push(`Found ${shopifyVariants.length} Shopify variants to process.`);
+        log.push(`Found ${shopifyVariants.length} total variants in the store.`);
 
-        // 3. Process each variant and execute updates
-        for (const variant of shopifyVariants) {
-            const btiPartNumber = variant.btiPartNumber.value;
-            const btiStock = btiStockMap.get(btiPartNumber) || 0;
-            const shopifyStock = variant.inventoryQuantity;
-            const outOfStockAction = variant.product.outOfStockAction?.value || 'Make Unavailable (Track Inventory)';
-            const isTrulyOutOfStock = shopifyStock <= 0 && btiStock <= 0;
-            const isCurrentlySetToContinueSelling = variant.inventoryPolicy === 'CONTINUE';
-            const variantIdentifier = `${variant.product.title} - ${variant.title}`;
+        const targetVariant = shopifyVariants.find(v => v.btiPartNumber && v.btiPartNumber.value === BTI_PART_NUMBER_TO_FIND);
 
-            if (outOfStockAction === 'Make Unavailable (Track Inventory)') {
-                if (isTrulyOutOfStock && isCurrentlySetToContinueSelling) {
-                    await updateVariantInventoryPolicy(variant.id, 'DENY');
-                    log.push(` -> ACTION: Made variant "${variantIdentifier}" unavailable (OOS).`);
-                    changesMade.push({ name: variantIdentifier, action: 'Made Unavailable' });
-                } else if (!isTrulyOutOfStock && !isCurrentlySetToContinueSelling) {
-                    await updateVariantInventoryPolicy(variant.id, 'CONTINUE');
-                    log.push(` -> ACTION: Made variant "${variantIdentifier}" available again (Back in Stock).`);
-                    changesMade.push({ name: variantIdentifier, action: 'Made Available' });
-                }
-            } else if (outOfStockAction === 'Switch to Special Order Template') {
-                if (!isCurrentlySetToContinueSelling) {
-                    await updateVariantInventoryPolicy(variant.id, 'CONTINUE');
-                    log.push(` -> INFO: Ensuring variant "${variantIdentifier}" for Special Order product is sellable.`);
-                    changesMade.push({ name: variantIdentifier, action: 'Made Available' });
-                }
-            }
-        }
-        
-        // 4. Generate and Send Sync Report
-        if (changesMade.length > 0) {
-            log.push(`Found ${changesMade.length} changes to report. Generating email.`);
-            let reportHtml = `<h1>BTI Inventory Sync Report</h1><p>The sync completed successfully and the following ${changesMade.length} variants had their availability updated based on BTI stock levels.</p>`;
-            const unavailableItems = changesMade.filter(c => c.action === 'Made Unavailable');
-            if (unavailableItems.length > 0) {
-                reportHtml += `<hr><h3>Made Unavailable (Out of Stock)</h3><ul>${unavailableItems.map(item => `<li>${item.name}</li>`).join('')}</ul>`;
-            }
-            const availableItems = changesMade.filter(c => c.action === 'Made Available');
-            if (availableItems.length > 0) {
-                reportHtml += `<hr><h3>Made Available (Back in Stock)</h3><ul>${availableItems.map(item => `<li>${item.name}</li>`).join('')}</ul>`;
-            }
-            await resend.emails.send({
-                from: 'LoamLabs BTI Sync <info@loamlabsusa.com>',
-                to: REPORT_EMAIL_TO,
-                subject: `BTI Sync Report: ${changesMade.length} Variants Updated`,
-                html: reportHtml,
-            });
-            log.push("Sync report email sent successfully.");
+        log.push("\n--- DIAGNOSTIC DUMP FOR TARGET VARIANT ---");
+        if (targetVariant) {
+            log.push("SUCCESS: Found the target variant!");
+            log.push(JSON.stringify(targetVariant, null, 2));
         } else {
-            log.push("Sync complete. No changes to variant availability were needed.");
+            log.push(`FAILURE: Could not find any variant with BTI Part Number: ${BTI_PART_NUMBER_TO_FIND}`);
+            log.push("Please double-check the part number and ensure the metafield is saved correctly on the variant in Shopify.");
         }
-        message = `Sync complete. Processed ${shopifyVariants.length} variants. ${changesMade.length} changes made.`;
+        log.push("--- END DIAGNOSTIC DUMP ---");
 
     } catch (error) {
-        console.error("An error occurred during the BTI sync:", error);
+        console.error("An error occurred during diagnostic:", error);
         log.push(`\n--- ERROR --- \n${error.message}`);
-        status = 500;
-        message = `Sync failed: ${error.message}`;
-        await resend.emails.send({
-            from: 'LoamLabs BTI Sync <info@loamlabsusa.com>', to: REPORT_EMAIL_TO,
-            subject: `BTI Sync Failure: ${error.message}`,
-            html: `<h1>BTI Inventory Sync Failed</h1><p>...</p><pre>${log.join('\n')}</pre>`
-        });
     }
     
     console.log(log.join('\n'));
-    res.status(status).send(message);
+    res.status(200).send("Diagnostic complete. Check Vercel logs.");
 };
 
 // --- SHOPIFY API HELPER FUNCTIONS ---
 async function getAllShopifyVariants() {
-    // ----- THIS IS THE CORRECTED QUERY -----
-    // Using the '-metafield' syntax that we already proved works.
     const query = `
     query($cursor: String) {
-      productVariants(first: 250, after: $cursor, query: "-metafield:custom.bti_part_number:''") {
+      productVariants(first: 250, after: $cursor) {
         edges {
           node {
             id
             title
-            inventoryQuantity
-            inventoryPolicy
-            btiPartNumber: metafield(namespace: "custom", key: "bti_part_number") { value }
-            product {
+            btiPartNumber: metafield(namespace: "custom", key: "bti_part_number") {
               id
-              title
-              outOfStockAction: metafield(namespace: "custom", key: "out_of_stock_action") { value }
+              key
+              namespace
+              value
             }
           }
         }
@@ -149,7 +78,6 @@ async function getAllShopifyVariants() {
     do {
         const response = await client.query({ data: { query, variables: { cursor } } });
         if (!response.body.data.productVariants) {
-            console.warn("Shopify API returned no productVariants object on a page.");
             break;
         }
         const pageData = response.body.data.productVariants;
@@ -157,36 +85,12 @@ async function getAllShopifyVariants() {
         hasNextPage = pageData.pageInfo.hasNextPage;
         cursor = pageData.pageInfo.endCursor;
     } while (hasNextPage);
-    // This manual filter is no longer needed as the query is now correct.
     return allVariants;
-}
-
-async function updateVariantInventoryPolicy(variantId, policy) {
-    const client = new shopify.clients.Graphql({ session: getSession() });
-    const response = await client.query({
-        data: {
-            query: `mutation productVariantUpdate($input: ProductVariantInput!) {
-                productVariantUpdate(input: $input) {
-                    productVariant { id inventoryPolicy }
-                    userErrors { field message }
-                }
-            }`,
-            variables: {
-                input: {
-                    id: variantId,
-                    inventoryPolicy: policy, // DENY or CONTINUE
-                }
-            }
-        }
-    });
-    if(response.body.data.productVariantUpdate.userErrors.length > 0){
-        console.error("Error updating variant policy:", response.body.data.productVariantUpdate.userErrors);
-    }
 }
 
 function getSession() {
     return {
-        id: 'bti-sync-session',
+        id: 'bti-sync-diagnostic-session',
         shop: SHOPIFY_STORE_DOMAIN,
         accessToken: SHOPIFY_ADMIN_API_TOKEN,
         state: 'not-used',
