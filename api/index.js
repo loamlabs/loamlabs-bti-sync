@@ -24,7 +24,7 @@ module.exports = async (req, res) => {
     const log = ["Diagnostic Started..."];
 
     // ----- EDIT THIS LINE WITH THE BTI PART NUMBER OF YOUR TEST VARIANT -----
-    const BTI_PART_NUMBER_TO_FIND = "1K000000";
+    const BTI_PART_NUMBER_TO_FIND = "1K825111";
 
     try {
         log.push("Fetching ALL Shopify variants to find our target...");
