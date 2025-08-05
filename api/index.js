@@ -14,12 +14,12 @@ const {
   REPORT_EMAIL_TO,
 } = process.env;
 
-// Initialize clients with the LATEST API version
+// Initialize clients
 const shopify = shopifyApi.shopifyApi({
   apiKey: 'temp_key', apiSecretKey: 'temp_secret',
   scopes: ['read_products', 'write_products'],
   hostName: SHOPIFY_STORE_DOMAIN.replace('https://', ''),
-  apiVersion: shopifyApi.LATEST_API_VERSION,
+  apiVersion: shopifyApi.LATEST_API_VERSION, // Keep this for GraphQL queries
   isEmbeddedApp: false, isCustomStoreApp: true,
   adminApiAccessToken: SHOPIFY_ADMIN_API_TOKEN,
 });
@@ -63,17 +63,17 @@ module.exports = async (req, res) => {
 
             if (outOfStockAction === 'Make Unavailable (Track Inventory)') {
                 if (isTrulyOutOfStock && isCurrentlySetToContinueSelling) {
-                    await updateVariantInventoryPolicy(variant.id, 'DENY');
+                    await updateVariantInventoryPolicy(variant.id, 'deny');
                     log.push(` -> ACTION: Made variant "${variantIdentifier}" unavailable (OOS).`);
                     changesMade.push({ name: variantIdentifier, action: 'Made Unavailable' });
                 } else if (!isTrulyOutOfStock && !isCurrentlySetToContinueSelling) {
-                    await updateVariantInventoryPolicy(variant.id, 'CONTINUE');
+                    await updateVariantInventoryPolicy(variant.id, 'continue');
                     log.push(` -> ACTION: Made variant "${variantIdentifier}" available again (Back in Stock).`);
                     changesMade.push({ name: variantIdentifier, action: 'Made Available' });
                 }
             } else if (outOfStockAction === 'Switch to Special Order Template') {
                 if (!isCurrentlySetToContinueSelling) {
-                    await updateVariantInventoryPolicy(variant.id, 'CONTINUE');
+                    await updateVariantInventoryPolicy(variant.id, 'continue');
                     log.push(` -> INFO: Ensuring variant "${variantIdentifier}" for Special Order product is sellable.`);
                     changesMade.push({ name: variantIdentifier, action: 'Made Available' });
                 }
@@ -93,14 +93,13 @@ module.exports = async (req, res) => {
                 reportHtml += `<hr><h3>Made Available (Back in Stock)</h3><ul>${availableItems.map(item => `<li>${item.name}</li>`).join('')}</ul>`;
             }
             await resend.emails.send({
-                from: 'LoamLabs BTI Sync <info@loamlabsusa.com>',
-                to: REPORT_EMAIL_TO,
+                from: 'LoamLabs BTI Sync <info@loamlabsusa.com>', to: REPORT_EMAIL_TO,
                 subject: `BTI Sync Report: ${changesMade.length} Variants Updated`,
                 html: reportHtml,
             });
             log.push("Sync report email sent successfully.");
         } else {
-            log.push("Sync complete. No changes to variant availability were needed.");
+            log.push("Sync complete. No changes were needed.");
         }
         message = `Sync complete. Processed ${shopifyVariants.length} variants. ${changesMade.length} changes made.`;
 
@@ -109,11 +108,7 @@ module.exports = async (req, res) => {
         log.push(`\n--- ERROR --- \n${error.message}`);
         status = 500;
         message = `Sync failed: ${error.message}`;
-        await resend.emails.send({
-            from: 'LoamLabs BTI Sync <info@loamlabsusa.com>', to: REPORT_EMAIL_TO,
-            subject: `BTI Sync Failure: ${error.message}`,
-            html: `<h1>BTI Sync Failed</h1><p>...</p><pre>${log.join('\n')}</pre>`
-        });
+        await resend.emails.send({ from: 'LoamLabs BTI Sync <info@loamlabsusa.com>', to: REPORT_EMAIL_TO, subject: `BTI Sync Failure: ${error.message}`, html: `<h1>BTI Sync Failed</h1><p>...</p><pre>${log.join('\n')}</pre>` });
     }
     
     console.log(log.join('\n'));
@@ -127,14 +122,10 @@ async function getAllShopifyVariants() {
       productVariants(first: 250, after: $cursor) {
         edges {
           node {
-            id
-            title
-            inventoryQuantity
-            inventoryPolicy
+            id, title, inventoryQuantity, inventoryPolicy
             btiPartNumber: metafield(namespace: "custom", key: "bti_part_number") { value }
             product {
-              id
-              title
+              id, title
               outOfStockAction: metafield(namespace: "custom", key: "out_of_stock_action") { value }
             }
           }
@@ -156,27 +147,23 @@ async function getAllShopifyVariants() {
     return allVariants.filter(variant => variant.btiPartNumber && variant.btiPartNumber.value);
 }
 
-// ----- THIS IS THE FINAL, ROBUST GraphQL API FUNCTION -----
-async function updateVariantInventoryPolicy(variantId, policy) {
-    const client = new shopify.clients.Graphql({ session: getSession() });
-    const response = await client.query({
+// ----- THIS IS THE PROVEN, RELIABLE REST API FUNCTION -----
+async function updateVariantInventoryPolicy(variantGid, policy) {
+    const variantId = variantGid.split('/').pop();
+    const client = new shopify.clients.Rest({ session: getSession() });
+    
+    const response = await client.put({
+        path: `variants/${variantId}`,
         data: {
-            query: `mutation productVariantUpdate($input: ProductVariantInput!) {
-                productVariantUpdate(input: $input) {
-                    productVariant { id inventoryPolicy }
-                    userErrors { field message }
-                }
-            }`,
-            variables: {
-                input: {
-                    id: variantId,
-                    inventoryPolicy: policy, // DENY or CONTINUE
-                }
+            variant: {
+                id: variantId,
+                inventory_policy: policy // 'deny' or 'continue'
             }
-        }
+        },
     });
-    if(response.body.data.productVariantUpdate.userErrors.length > 0){
-        console.error("Error updating variant policy:", response.body.data.productVariantUpdate.userErrors);
+
+    if (!response.ok) {
+        console.error("Error updating variant policy via REST:", response.body);
     }
 }
 
