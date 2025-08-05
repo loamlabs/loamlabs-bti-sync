@@ -1,4 +1,4 @@
-// Import the necessary tools (libraries) 
+// Import the necessary tools (libraries)
 const shopifyApi = require('@shopify/shopify-api');
 require('@shopify/shopify-api/adapters/node');
 const { Resend } = require('resend');
