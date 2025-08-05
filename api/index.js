@@ -14,19 +14,21 @@ const {
   REPORT_EMAIL_TO,
 } = process.env;
 
-// Initialize clients
+// Initialize clients with the LATEST API version
 const shopify = shopifyApi.shopifyApi({
   apiKey: 'temp_key', apiSecretKey: 'temp_secret',
   scopes: ['read_products', 'write_products'],
   hostName: SHOPIFY_STORE_DOMAIN.replace('https://', ''),
+  // ----- THIS IS THE CORRECTED LINE -----
   apiVersion: shopifyApi.LATEST_API_VERSION,
   isEmbeddedApp: false, isCustomStoreApp: true,
   adminApiAccessToken: SHOPIFY_ADMIN_API_TOKEN,
 });
+
 const resend = new Resend(RESEND_API_KEY);
 const BTI_INVENTORY_URL = 'https://www.bti-usa.com/inventory';
 
-// The main sync function
+// --- The main sync function ---
 module.exports = async (req, res) => {
     console.log("BTI inventory sync function triggered...");
     const log = ["BTI Sync Started..."];
@@ -123,7 +125,7 @@ module.exports = async (req, res) => {
 async function getAllShopifyVariants() {
     const query = `
     query($cursor: String) {
-      productVariants(first: 250, after: $cursor) {
+      productVariants(first: 250, after: $cursor, query: "-metafield:custom.bti_part_number:''") {
         edges {
           node {
             id
@@ -152,8 +154,7 @@ async function getAllShopifyVariants() {
         hasNextPage = pageData.pageInfo.hasNextPage;
         cursor = pageData.pageInfo.endCursor;
     } while (hasNextPage);
-    
-    return allVariants.filter(variant => variant.btiPartNumber && variant.btiPartNumber.value);
+    return allVariants;
 }
 
 async function updateVariantInventoryPolicy(variantId, policy) {
@@ -169,7 +170,7 @@ async function updateVariantInventoryPolicy(variantId, policy) {
             variables: {
                 input: {
                     id: variantId,
-                    inventoryPolicy: policy,
+                    inventoryPolicy: policy, // DENY or CONTINUE
                 }
             }
         }
