@@ -14,14 +14,19 @@ const {
   REPORT_EMAIL_TO,
 } = process.env;
 
-// Initialize clients
+// --- DEFINITIVE, CORRECTED INITIALIZATION ---
 const shopify = shopifyApi.shopifyApi({
-  apiKey: 'temp_key', apiSecretKey: 'temp_secret',
+  apiKey: 'placeholder', // Not used for auth, but required by the library
+  apiSecretKey: 'placeholder', // Not used for auth, but required by the library
   scopes: ['read_products', 'write_products'],
   hostName: SHOPIFY_STORE_DOMAIN.replace('https://', ''),
   apiVersion: shopifyApi.LATEST_API_VERSION,
-  isEmbeddedApp: false, isCustomStoreApp: true,
+  isEmbeddedApp: false,
+  isCustomStoreApp: true,
+  // This is the critical line that was missing:
+  adminApiAccessToken: SHOPIFY_ADMIN_API_TOKEN,
 });
+
 const resend = new Resend(RESEND_API_KEY);
 const BTI_INVENTORY_URL = 'https://www.bti-usa.com/inventory';
 
@@ -33,7 +38,7 @@ module.exports = async (req, res) => {
     let message = "Sync completed successfully.";
 
     try {
-        // --- 1. FETCH AND PARSE BTI INVENTORY ---
+        // 1. Fetch and Parse BTI Inventory
         log.push("Fetching inventory from BTI...");
         const btiCredentials = Buffer.from(`${BTI_USERNAME}:${BTI_PASSWORD}`).toString('base64');
         const btiResponse = await fetch(BTI_INVENTORY_URL, { headers: { 'Authorization': `Basic ${btiCredentials}` } });
@@ -43,44 +48,36 @@ module.exports = async (req, res) => {
         const btiStockMap = new Map(records.map(r => [r.id, parseInt(r.available, 10) || 0]));
         log.push(`Successfully parsed ${btiStockMap.size} items from BTI feed.`);
 
-        // --- 2. FETCH ALL RELEVANT SHOPIFY VARIANTS ---
+        // 2. Fetch all Shopify variants that are linked to BTI
         log.push("Fetching all Shopify variants with a BTI part number...");
         const shopifyVariants = await getAllShopifyVariants();
         log.push(`Found ${shopifyVariants.length} Shopify variants to process.`);
 
-        // --- 3. PROCESS EACH VARIANT AND EXECUTE UPDATES ---
+        // 3. Process each variant and execute updates
         for (const variant of shopifyVariants) {
             const btiPartNumber = variant.btiPartNumber.value;
             const btiStock = btiStockMap.get(btiPartNumber) || 0;
             const shopifyStock = variant.inventoryQuantity;
-            const outOfStockAction = variant.product.outOfStockAction?.value || 'Make Unavailable (Track Inventory)'; // Default action
-
+            const outOfStockAction = variant.product.outOfStockAction?.value || 'Make Unavailable (Track Inventory)';
             const isTrulyOutOfStock = shopifyStock <= 0 && btiStock <= 0;
+            const isCurrentlySetToContinueSelling = variant.inventoryPolicy === 'CONTINUE';
 
             if (outOfStockAction === 'Make Unavailable (Track Inventory)') {
-                const needsToBeMadeUnavailable = isTrulyOutOfStock;
-                const isCurrentlyUnavailable = variant.inventoryPolicy === 'DENY' && !variant.continuesToSell;
-
-                if (needsToBeMadeUnavailable && !isCurrentlyUnavailable) {
-                    await updateVariantInventoryPolicy(variant.id, 'DENY', false);
-                    log.push(` -> ACTION: Made variant "${variant.title}" unavailable (OOS).`);
-                } else if (!needsToBeMadeUnavailable && isCurrentlyUnavailable) {
-                    await updateVariantInventoryPolicy(variant.id, 'CONTINUE', true);
-                    log.push(` -> ACTION: Made variant "${variant.title}" available again (Back in Stock).`);
+                if (isTrulyOutOfStock && isCurrentlySetToContinueSelling) {
+                    await updateVariantInventoryPolicy(variant.id, 'DENY');
+                    log.push(` -> ACTION: Made variant "${variant.product.title} - ${variant.title}" unavailable (OOS).`);
+                } else if (!isTrulyOutOfStock && !isCurrentlySetToContinueSelling) {
+                    await updateVariantInventoryPolicy(variant.id, 'CONTINUE');
+                    log.push(` -> ACTION: Made variant "${variant.product.title} - ${variant.title}" available again (Back in Stock).`);
                 }
             } else if (outOfStockAction === 'Switch to Special Order Template') {
-                 // This action now implies we keep the variant sellable.
-                 // We will still ensure "continue selling" is enabled if it was disabled.
-                if (variant.inventoryPolicy === 'DENY' && !variant.continuesToSell) {
-                    await updateVariantInventoryPolicy(variant.id, 'CONTINUE', true);
-                    log.push(` -> INFO: Ensuring variant "${variant.title}" for Special Order product is sellable.`);
+                if (!isCurrentlySetToContinueSelling) {
+                    await updateVariantInventoryPolicy(variant.id, 'CONTINUE');
+                    log.push(` -> INFO: Ensuring variant "${variant.product.title} - ${variant.title}" for Special Order product is sellable.`);
                 }
-                // The template switching logic is now separate and based on the aggregate state
             }
         }
         
-        // (Optional: Add template switching logic here if needed in the future)
-
         log.push("Sync logic complete.");
         message = `Sync complete. Processed ${shopifyVariants.length} variants.`;
 
@@ -89,7 +86,6 @@ module.exports = async (req, res) => {
         log.push(`\n--- ERROR --- \n${error.message}`);
         status = 500;
         message = `Sync failed: ${error.message}`;
-
         await resend.emails.send({
             from: 'LoamLabs BTI Sync <info@loamlabsusa.com>', to: REPORT_EMAIL_TO,
             subject: `BTI Sync Failure: ${error.message}`,
@@ -109,10 +105,8 @@ async function getAllShopifyVariants() {
         edges {
           node {
             id
-            title
             inventoryQuantity
             inventoryPolicy
-            continuesToSell: inventoryPolicy(handle: "CONTINUE")
             btiPartNumber: metafield(namespace: "custom", key: "bti_part_number") { value }
             product {
               id
@@ -129,6 +123,10 @@ async function getAllShopifyVariants() {
     let hasNextPage = true; let cursor = null;
     do {
         const response = await client.query({ data: { query, variables: { cursor } } });
+        if (!response.body.data.productVariants) {
+            console.warn("Shopify API returned no productVariants object.");
+            break;
+        }
         const pageData = response.body.data.productVariants;
         allVariants.push(...pageData.edges.map(edge => edge.node));
         hasNextPage = pageData.pageInfo.hasNextPage;
@@ -137,30 +135,9 @@ async function getAllShopifyVariants() {
     return allVariants;
 }
 
-async function updateVariantInventoryPolicy(variantId, policy, continueSelling) {
+async function updateVariantInventoryPolicy(variantId, policy) {
     const client = new shopify.clients.Graphql({ session: getSession() });
-    await client.query({
-        data: {
-            query: `mutation inventorySetOnHandQuantities($input: InventorySetOnHandQuantitiesInput!) {
-                inventorySetOnHandQuantities(input: $input) {
-                    inventoryAdjustmentGroup { id }
-                    userErrors { field message }
-                }
-            }`,
-            variables: {
-                input: {
-                    inventoryItemAdjustments: [{
-                        inventoryItemId: variantId.replace('ProductVariant', 'InventoryItem'), // Heuristic, needs proper mapping
-                        availableDelta: 0
-                    }],
-                    // This part is a placeholder as the mutation to change policy is different
-                }
-            }
-        }
-    });
-    // NOTE: The above mutation is a placeholder. The actual mutation to change inventory policy
-    // is `productVariantUpdate` which we will use instead.
-    await client.query({
+    const response = await client.query({
         data: {
             query: `mutation productVariantUpdate($input: ProductVariantInput!) {
                 productVariantUpdate(input: $input) {
@@ -171,23 +148,22 @@ async function updateVariantInventoryPolicy(variantId, policy, continueSelling) 
             variables: {
                 input: {
                     id: variantId,
-                    inventoryPolicy: policy,
-                    // "continueSelling" is not a direct input, it's controlled by the policy.
-                    // Let's assume DENY stops it, CONTINUE allows it.
+                    inventoryPolicy: policy, // DENY or CONTINUE
                 }
             }
         }
     });
+    if(response.body.data.productVariantUpdate.userErrors.length > 0){
+        console.error("Error updating variant policy:", response.body.data.productVariantUpdate.userErrors);
+    }
 }
 
-
 function getSession() {
-    // This needs to be corrected as well based on the last bug
     return {
         id: 'bti-sync-session',
         shop: SHOPIFY_STORE_DOMAIN,
         accessToken: SHOPIFY_ADMIN_API_TOKEN,
         state: 'not-used',
-        isOnline: true, // Should be true for Admin API access token
+        isOnline: true,
     };
 }
