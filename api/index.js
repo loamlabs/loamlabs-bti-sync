@@ -95,9 +95,11 @@ module.exports = async (req, res) => {
 
 // --- SHOPIFY API HELPER FUNCTIONS ---
 async function getAllShopifyVariants() {
+    // ----- THIS IS THE NEW, MORE RELIABLE QUERY -----
+    // It fetches ALL variants and we will filter them in our code.
     const query = `
     query($cursor: String) {
-      productVariants(first: 250, after: $cursor, query: "-metafield:custom.bti_part_number:''") {
+      productVariants(first: 250, after: $cursor) {
         edges {
           node {
             id
@@ -120,7 +122,7 @@ async function getAllShopifyVariants() {
     do {
         const response = await client.query({ data: { query, variables: { cursor } } });
         if (!response.body.data.productVariants) {
-            console.warn("Shopify API returned no productVariants object.");
+            console.warn("Shopify API returned no productVariants object on a page.");
             break;
         }
         const pageData = response.body.data.productVariants;
@@ -128,7 +130,10 @@ async function getAllShopifyVariants() {
         hasNextPage = pageData.pageInfo.hasNextPage;
         cursor = pageData.pageInfo.endCursor;
     } while (hasNextPage);
-    return allVariants;
+    
+    // --- THIS IS THE NEW, MANUAL FILTERING STEP ---
+    // We now filter the full list in our own code, which is 100% reliable.
+    return allVariants.filter(variant => variant.btiPartNumber && variant.btiPartNumber.value);
 }
 
 async function updateVariantInventoryPolicy(variantId, policy) {
