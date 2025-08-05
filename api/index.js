@@ -14,7 +14,7 @@ const {
   REPORT_EMAIL_TO,
 } = process.env;
 
-// Initialize clients
+// Initialize clients with the LATEST API version
 const shopify = shopifyApi.shopifyApi({
   apiKey: 'temp_key', apiSecretKey: 'temp_secret',
   scopes: ['read_products', 'write_products'],
@@ -23,6 +23,7 @@ const shopify = shopifyApi.shopifyApi({
   isEmbeddedApp: false, isCustomStoreApp: true,
   adminApiAccessToken: SHOPIFY_ADMIN_API_TOKEN,
 });
+
 const resend = new Resend(RESEND_API_KEY);
 const BTI_INVENTORY_URL = 'https://www.bti-usa.com/inventory';
 
@@ -62,17 +63,17 @@ module.exports = async (req, res) => {
 
             if (outOfStockAction === 'Make Unavailable (Track Inventory)') {
                 if (isTrulyOutOfStock && isCurrentlySetToContinueSelling) {
-                    await updateVariantInventoryPolicy(variant.id, 'deny'); // Use 'deny' for REST API
+                    await updateVariantInventoryPolicy(variant.id, 'DENY');
                     log.push(` -> ACTION: Made variant "${variantIdentifier}" unavailable (OOS).`);
                     changesMade.push({ name: variantIdentifier, action: 'Made Unavailable' });
                 } else if (!isTrulyOutOfStock && !isCurrentlySetToContinueSelling) {
-                    await updateVariantInventoryPolicy(variant.id, 'continue'); // Use 'continue' for REST API
+                    await updateVariantInventoryPolicy(variant.id, 'CONTINUE');
                     log.push(` -> ACTION: Made variant "${variantIdentifier}" available again (Back in Stock).`);
                     changesMade.push({ name: variantIdentifier, action: 'Made Available' });
                 }
             } else if (outOfStockAction === 'Switch to Special Order Template') {
                 if (!isCurrentlySetToContinueSelling) {
-                    await updateVariantInventoryPolicy(variant.id, 'continue');
+                    await updateVariantInventoryPolicy(variant.id, 'CONTINUE');
                     log.push(` -> INFO: Ensuring variant "${variantIdentifier}" for Special Order product is sellable.`);
                     changesMade.push({ name: variantIdentifier, action: 'Made Available' });
                 }
@@ -82,7 +83,7 @@ module.exports = async (req, res) => {
         // 4. Generate and Send Sync Report
         if (changesMade.length > 0) {
             log.push(`Found ${changesMade.length} changes to report. Generating email.`);
-            let reportHtml = `<h1>BTI Inventory Sync Report</h1><p>The sync completed successfully and the following ${changesMade.length} variants had their availability updated...</p>`;
+            let reportHtml = `<h1>BTI Inventory Sync Report</h1><p>...</p>`;
             const unavailableItems = changesMade.filter(c => c.action === 'Made Unavailable');
             if (unavailableItems.length > 0) {
                 reportHtml += `<hr><h3>Made Unavailable (Out of Stock)</h3><ul>${unavailableItems.map(item => `<li>${item.name}</li>`).join('')}</ul>`;
@@ -108,7 +109,11 @@ module.exports = async (req, res) => {
         log.push(`\n--- ERROR --- \n${error.message}`);
         status = 500;
         message = `Sync failed: ${error.message}`;
-        await resend.emails.send({ from: 'LoamLabs BTI Sync <info@loamlabsusa.com>', to: REPORT_EMAIL_TO, subject: `BTI Sync Failure: ${error.message}`, html: `<h1>BTI Sync Failed</h1><p>...</p><pre>${log.join('\n')}</pre>` });
+        await resend.emails.send({
+            from: 'LoamLabs BTI Sync <info@loamlabsusa.com>', to: REPORT_EMAIL_TO,
+            subject: `BTI Sync Failure: ${error.message}`,
+            html: `<h1>BTI Sync Failed</h1><p>...</p><pre>${log.join('\n')}</pre>`
+        });
     }
     
     console.log(log.join('\n'));
@@ -122,10 +127,14 @@ async function getAllShopifyVariants() {
       productVariants(first: 250, after: $cursor) {
         edges {
           node {
-            id, title, inventoryQuantity, inventoryPolicy
+            id
+            title
+            inventoryQuantity
+            inventoryPolicy
             btiPartNumber: metafield(namespace: "custom", key: "bti_part_number") { value }
             product {
-              id, title
+              id
+              title
               outOfStockAction: metafield(namespace: "custom", key: "out_of_stock_action") { value }
             }
           }
@@ -147,24 +156,27 @@ async function getAllShopifyVariants() {
     return allVariants.filter(variant => variant.btiPartNumber && variant.btiPartNumber.value);
 }
 
-// ----- THIS IS THE NEW, RELIABLE REST API FUNCTION -----
-async function updateVariantInventoryPolicy(variantGid, policy) {
-    // Extract the numeric ID from the full GID
-    const variantId = variantGid.split('/').pop();
-    const client = new shopify.clients.Rest({ session: getSession() });
-    
-    const response = await client.put({
-        path: `variants/${variantId}`,
+// ----- THIS IS THE FINAL, ROBUST GraphQL API FUNCTION -----
+async function updateVariantInventoryPolicy(variantId, policy) {
+    const client = new shopify.clients.Graphql({ session: getSession() });
+    const response = await client.query({
         data: {
-            variant: {
-                id: variantId,
-                inventory_policy: policy // 'deny' or 'continue'
+            query: `mutation productVariantUpdate($input: ProductVariantInput!) {
+                productVariantUpdate(input: $input) {
+                    productVariant { id inventoryPolicy }
+                    userErrors { field message }
+                }
+            }`,
+            variables: {
+                input: {
+                    id: variantId,
+                    inventoryPolicy: policy, // DENY or CONTINUE
+                }
             }
-        },
+        }
     });
-
-    if (!response.ok) {
-        console.error("Error updating variant policy via REST:", response.body);
+    if(response.body.data.productVariantUpdate.userErrors.length > 0){
+        console.error("Error updating variant policy:", response.body.data.productVariantUpdate.userErrors);
     }
 }
 
