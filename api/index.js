@@ -14,13 +14,15 @@ const {
   REPORT_EMAIL_TO,
 } = process.env;
 
-// Initialize clients with the LATEST API version
+// --- DEFINITIVE, CORRECTED INITIALIZATION ---
 const shopify = shopifyApi.shopifyApi({
-  apiKey: 'temp_key', apiSecretKey: 'temp_secret',
+  apiKey: 'placeholder',
+  apiSecretKey: 'placeholder',
   scopes: ['read_products', 'write_products'],
   hostName: SHOPIFY_STORE_DOMAIN.replace('https://', ''),
-  apiVersion: shopifyApi.LATEST_API_VERSION,
-  isEmbeddedApp: false, isCustomStoreApp: true,
+  apiVersion: shopifyApi.LATEST_API_VERSION, // Use the latest version
+  isEmbeddedApp: false,
+  isCustomStoreApp: true,
   adminApiAccessToken: SHOPIFY_ADMIN_API_TOKEN,
 });
 
@@ -122,8 +124,6 @@ module.exports = async (req, res) => {
 
 // --- SHOPIFY API HELPER FUNCTIONS ---
 async function getAllShopifyVariants() {
-    // ----- THIS IS THE CORRECTED, "BRUTE FORCE" QUERY -----
-    // It fetches ALL variants, and we filter them reliably in our code.
     const query = `
     query($cursor: String) {
       productVariants(first: 250, after: $cursor) {
@@ -149,17 +149,12 @@ async function getAllShopifyVariants() {
     let hasNextPage = true; let cursor = null;
     do {
         const response = await client.query({ data: { query, variables: { cursor } } });
-        if (!response.body.data.productVariants) {
-            console.warn("Shopify API returned no productVariants object on a page.");
-            break;
-        }
+        if (!response.body.data.productVariants) { break; }
         const pageData = response.body.data.productVariants;
         allVariants.push(...pageData.edges.map(edge => edge.node));
         hasNextPage = pageData.pageInfo.hasNextPage;
         cursor = pageData.pageInfo.endCursor;
     } while (hasNextPage);
-    
-    // --- THIS IS THE RELIABLE, MANUAL FILTERING STEP ---
     return allVariants.filter(variant => variant.btiPartNumber && variant.btiPartNumber.value);
 }
 
@@ -176,7 +171,7 @@ async function updateVariantInventoryPolicy(variantId, policy) {
             variables: {
                 input: {
                     id: variantId,
-                    inventoryPolicy: policy, // DENY or CONTINUE
+                    inventoryPolicy: policy,
                 }
             }
         }
