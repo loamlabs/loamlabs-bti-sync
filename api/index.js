@@ -32,7 +32,7 @@ module.exports = async (req, res) => {
     const log = ["BTI Sync Started..."];
     let status = 200;
     let message = "Sync completed successfully.";
-    const changesMade = []; // NEW: Array to track changes for the report
+    const changesMade = [];
 
     try {
         // 1. Fetch and Parse BTI Inventory
@@ -58,46 +58,39 @@ module.exports = async (req, res) => {
             const outOfStockAction = variant.product.outOfStockAction?.value || 'Make Unavailable (Track Inventory)';
             const isTrulyOutOfStock = shopifyStock <= 0 && btiStock <= 0;
             const isCurrentlySetToContinueSelling = variant.inventoryPolicy === 'CONTINUE';
-            const variantIdentifier = `"${variant.product.title} - ${variant.title}"`;
+            const variantIdentifier = `${variant.product.title} - ${variant.title}`;
 
             if (outOfStockAction === 'Make Unavailable (Track Inventory)') {
                 if (isTrulyOutOfStock && isCurrentlySetToContinueSelling) {
                     await updateVariantInventoryPolicy(variant.id, 'DENY');
-                    log.push(` -> ACTION: Made variant ${variantIdentifier} unavailable (OOS).`);
+                    log.push(` -> ACTION: Made variant "${variantIdentifier}" unavailable (OOS).`);
                     changesMade.push({ name: variantIdentifier, action: 'Made Unavailable' });
                 } else if (!isTrulyOutOfStock && !isCurrentlySetToContinueSelling) {
                     await updateVariantInventoryPolicy(variant.id, 'CONTINUE');
-                    log.push(` -> ACTION: Made variant ${variantIdentifier} available again (Back in Stock).`);
+                    log.push(` -> ACTION: Made variant "${variantIdentifier}" available again (Back in Stock).`);
                     changesMade.push({ name: variantIdentifier, action: 'Made Available' });
                 }
             } else if (outOfStockAction === 'Switch to Special Order Template') {
                 if (!isCurrentlySetToContinueSelling) {
                     await updateVariantInventoryPolicy(variant.id, 'CONTINUE');
-                    log.push(` -> INFO: Ensuring variant ${variantIdentifier} for Special Order product is sellable.`);
+                    log.push(` -> INFO: Ensuring variant "${variantIdentifier}" for Special Order product is sellable.`);
                     changesMade.push({ name: variantIdentifier, action: 'Made Available' });
                 }
             }
         }
         
-        // --- 4. GENERATE AND SEND SYNC REPORT ---
+        // 4. Generate and Send Sync Report
         if (changesMade.length > 0) {
             log.push(`Found ${changesMade.length} changes to report. Generating email.`);
             let reportHtml = `<h1>BTI Inventory Sync Report</h1><p>The sync completed successfully and the following ${changesMade.length} variants had their availability updated based on BTI stock levels.</p>`;
-            
             const unavailableItems = changesMade.filter(c => c.action === 'Made Unavailable');
             if (unavailableItems.length > 0) {
-                reportHtml += `<hr><h3>Made Unavailable (Out of Stock)</h3><ul>`;
-                unavailableItems.forEach(item => { reportHtml += `<li>${item.name}</li>`; });
-                reportHtml += `</ul>`;
+                reportHtml += `<hr><h3>Made Unavailable (Out of Stock)</h3><ul>${unavailableItems.map(item => `<li>${item.name}</li>`).join('')}</ul>`;
             }
-
             const availableItems = changesMade.filter(c => c.action === 'Made Available');
             if (availableItems.length > 0) {
-                reportHtml += `<hr><h3>Made Available (Back in Stock)</h3><ul>`;
-                availableItems.forEach(item => { reportHtml += `<li>${item.name}</li>`; });
-                reportHtml += `</ul>`;
+                reportHtml += `<hr><h3>Made Available (Back in Stock)</h3><ul>${availableItems.map(item => `<li>${item.name}</li>`).join('')}</ul>`;
             }
-
             await resend.emails.send({
                 from: 'LoamLabs BTI Sync <info@loamlabsusa.com>',
                 to: REPORT_EMAIL_TO,
@@ -108,7 +101,6 @@ module.exports = async (req, res) => {
         } else {
             log.push("Sync complete. No changes to variant availability were needed.");
         }
-
         message = `Sync complete. Processed ${shopifyVariants.length} variants. ${changesMade.length} changes made.`;
 
     } catch (error) {
@@ -119,7 +111,7 @@ module.exports = async (req, res) => {
         await resend.emails.send({
             from: 'LoamLabs BTI Sync <info@loamlabsusa.com>', to: REPORT_EMAIL_TO,
             subject: `BTI Sync Failure: ${error.message}`,
-            html: `<h1>BTI Inventory Sync Failed</h1><p>The automated sync process encountered a critical error. Please review the logs.</p><p><strong>Error:</strong> ${error.message}</p><hr><h3>Log:</h3><pre>${log.join('\n')}</pre>`
+            html: `<h1>BTI Inventory Sync Failed</h1><p>...</p><pre>${log.join('\n')}</pre>`
         });
     }
     
@@ -129,6 +121,8 @@ module.exports = async (req, res) => {
 
 // --- SHOPIFY API HELPER FUNCTIONS ---
 async function getAllShopifyVariants() {
+    // ----- THIS IS THE CORRECTED QUERY -----
+    // Using the '-metafield' syntax that we already proved works.
     const query = `
     query($cursor: String) {
       productVariants(first: 250, after: $cursor, query: "-metafield:custom.bti_part_number:''") {
@@ -163,7 +157,8 @@ async function getAllShopifyVariants() {
         hasNextPage = pageData.pageInfo.hasNextPage;
         cursor = pageData.pageInfo.endCursor;
     } while (hasNextPage);
-    return allVariants.filter(variant => variant.btiPartNumber && variant.btiPartNumber.value);
+    // This manual filter is no longer needed as the query is now correct.
+    return allVariants;
 }
 
 async function updateVariantInventoryPolicy(variantId, policy) {
