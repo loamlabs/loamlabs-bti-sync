@@ -19,7 +19,6 @@ const shopify = shopifyApi.shopifyApi({
   apiKey: 'temp_key', apiSecretKey: 'temp_secret',
   scopes: ['read_products', 'write_products'],
   hostName: SHOPIFY_STORE_DOMAIN.replace('https://', ''),
-  // ----- THIS IS THE CORRECTED LINE -----
   apiVersion: shopifyApi.LATEST_API_VERSION,
   isEmbeddedApp: false, isCustomStoreApp: true,
   adminApiAccessToken: SHOPIFY_ADMIN_API_TOKEN,
@@ -28,7 +27,7 @@ const shopify = shopifyApi.shopifyApi({
 const resend = new Resend(RESEND_API_KEY);
 const BTI_INVENTORY_URL = 'https://www.bti-usa.com/inventory';
 
-// --- The main sync function ---
+// The main sync function
 module.exports = async (req, res) => {
     console.log("BTI inventory sync function triggered...");
     const log = ["BTI Sync Started..."];
@@ -123,9 +122,11 @@ module.exports = async (req, res) => {
 
 // --- SHOPIFY API HELPER FUNCTIONS ---
 async function getAllShopifyVariants() {
+    // ----- THIS IS THE CORRECTED, "BRUTE FORCE" QUERY -----
+    // It fetches ALL variants, and we filter them reliably in our code.
     const query = `
     query($cursor: String) {
-      productVariants(first: 250, after: $cursor, query: "-metafield:custom.bti_part_number:''") {
+      productVariants(first: 250, after: $cursor) {
         edges {
           node {
             id
@@ -148,13 +149,18 @@ async function getAllShopifyVariants() {
     let hasNextPage = true; let cursor = null;
     do {
         const response = await client.query({ data: { query, variables: { cursor } } });
-        if (!response.body.data.productVariants) { break; }
+        if (!response.body.data.productVariants) {
+            console.warn("Shopify API returned no productVariants object on a page.");
+            break;
+        }
         const pageData = response.body.data.productVariants;
         allVariants.push(...pageData.edges.map(edge => edge.node));
         hasNextPage = pageData.pageInfo.hasNextPage;
         cursor = pageData.pageInfo.endCursor;
     } while (hasNextPage);
-    return allVariants;
+    
+    // --- THIS IS THE RELIABLE, MANUAL FILTERING STEP ---
+    return allVariants.filter(variant => variant.btiPartNumber && variant.btiPartNumber.value);
 }
 
 async function updateVariantInventoryPolicy(variantId, policy) {
