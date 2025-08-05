@@ -14,23 +14,19 @@ const {
   REPORT_EMAIL_TO,
 } = process.env;
 
-// --- DEFINITIVE, CORRECTED INITIALIZATION ---
+// Initialize clients
 const shopify = shopifyApi.shopifyApi({
-  apiKey: 'placeholder', // Not used for auth, but required by the library
-  apiSecretKey: 'placeholder', // Not used for auth, but required by the library
+  apiKey: 'temp_key', apiSecretKey: 'temp_secret',
   scopes: ['read_products', 'write_products'],
   hostName: SHOPIFY_STORE_DOMAIN.replace('https://', ''),
   apiVersion: shopifyApi.LATEST_API_VERSION,
-  isEmbeddedApp: false,
-  isCustomStoreApp: true,
-  // This is the critical line that was missing:
+  isEmbeddedApp: false, isCustomStoreApp: true,
   adminApiAccessToken: SHOPIFY_ADMIN_API_TOKEN,
 });
-
 const resend = new Resend(RESEND_API_KEY);
 const BTI_INVENTORY_URL = 'https://www.bti-usa.com/inventory';
 
-// --- The main sync function ---
+// The main sync function
 module.exports = async (req, res) => {
     console.log("BTI inventory sync function triggered...");
     const log = ["BTI Sync Started..."];
@@ -89,7 +85,7 @@ module.exports = async (req, res) => {
         await resend.emails.send({
             from: 'LoamLabs BTI Sync <info@loamlabsusa.com>', to: REPORT_EMAIL_TO,
             subject: `BTI Sync Failure: ${error.message}`,
-            html: `<h1>BTI Inventory Sync Failed</h1><p>The automated sync process encountered a critical error. Please review the logs.</p><p><strong>Error:</strong> ${error.message}</p><hr><h3>Log:</h3><pre>${log.join('\n')}</pre>`
+            html: `<h1>BTI Inventory Sync Failed</h1><p>...</p><pre>${log.join('\n')}</pre>`
         });
     }
     
@@ -101,7 +97,7 @@ module.exports = async (req, res) => {
 async function getAllShopifyVariants() {
     const query = `
     query($cursor: String) {
-      productVariants(first: 250, after: $cursor, query: "metafield:custom.bti_part_number:''") {
+      productVariants(first: 250, after: $cursor, query: "-metafield:custom.bti_part_number:''") {
         edges {
           node {
             id
