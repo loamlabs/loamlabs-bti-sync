@@ -15,15 +15,8 @@ const {
 } = process.env;
 
 // Initialize clients
-const shopify = shopifyApi.shopifyApi({
-  apiSecretKey: 'not-used-for-admin-token',
-  adminApiAccessToken: SHOPIFY_ADMIN_API_TOKEN,
-  isCustomStoreApp: true,
-  hostName: SHOPIFY_STORE_DOMAIN.replace('https://', ''),
-  apiVersion: shopifyApi.LATEST_API_VERSION,
-});
+const shopify = shopifyApi.shopifyApi({ /* ... */ });
 const resend = new Resend(RESEND_API_KEY);
-
 const BTI_INVENTORY_URL = 'https://www.bti-usa.com/inventory';
 
 // --- The main sync function ---
@@ -35,12 +28,18 @@ module.exports = async (req, res) => {
 
     try {
         // --- 1. FETCH AND PARSE BTI INVENTORY ---
-        log.push("Fetching inventory from BTI...");
+        log.push("Attempting to fetch inventory from BTI...");
+        
+        if (!BTI_USERNAME || !BTI_PASSWORD) {
+            throw new Error("BTI_USERNAME or BTI_PASSWORD environment variables are not set.");
+        }
+
         const btiCredentials = Buffer.from(`${BTI_USERNAME}:${BTI_PASSWORD}`).toString('base64');
         const btiResponse = await fetch(BTI_INVENTORY_URL, {
             headers: { 'Authorization': `Basic ${btiCredentials}` }
         });
 
+        log.push(`BTI server responded with status: ${btiResponse.status}`);
         if (!btiResponse.ok) {
             throw new Error(`BTI connection failed. Status: ${btiResponse.status} ${btiResponse.statusText}`);
         }
@@ -52,9 +51,15 @@ module.exports = async (req, res) => {
         log.push(`Successfully parsed ${btiStockMap.size} items from BTI feed.`);
 
         // --- 2. FETCH ALL RELEVANT SHOPIFY VARIANTS ---
-        log.push("Fetching all Shopify variants with a BTI part number...");
+        log.push("Fetching Shopify variants with a BTI part number...");
         const shopifyVariants = await getAllShopifyVariants();
         log.push(`Found ${shopifyVariants.length} Shopify variants to process.`);
+
+        if (shopifyVariants.length === 0) {
+            log.push("No variants found with the 'custom.bti_part_number' metafield. Nothing to sync. Exiting.");
+            console.log(log.join('\n'));
+            return res.status(200).send("Sync complete. No variants to process.");
+        }
 
         const productsToUpdate = new Map();
 
