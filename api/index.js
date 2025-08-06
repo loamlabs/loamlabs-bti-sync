@@ -19,32 +19,39 @@ const shopify = shopifyApi.shopifyApi({
   apiKey: 'temp_key', apiSecretKey: 'temp_secret',
   scopes: ['read_products', 'write_products'],
   hostName: SHOPIFY_STORE_DOMAIN.replace('https://', ''),
-  apiVersion: shopifyApi.LATEST_API_VERSION, // Keep this for GraphQL queries
+  apiVersion: shopifyApi.LATEST_API_VERSION,
   isEmbeddedApp: false, isCustomStoreApp: true,
   adminApiAccessToken: SHOPIFY_ADMIN_API_TOKEN,
 });
-
 const resend = new Resend(RESEND_API_KEY);
-const BTI_INVENTORY_URL = 'https://www.bti-usa.com/inventory';
+const BTI_FULL_DATA_URL = 'https://www.bti-usa.com/inventory?full=true';
 
 // The main sync function
 module.exports = async (req, res) => {
-    console.log("BTI inventory sync function triggered...");
+    console.log("BTI full sync (inventory & price) function triggered...");
     const log = ["BTI Sync Started..."];
     let status = 200;
     let message = "Sync completed successfully.";
-    const changesMade = [];
+    const changesMade = {
+        availability: [],
+        pricing: []
+    };
 
     try {
-        // 1. Fetch and Parse BTI Inventory
-        log.push("Fetching inventory from BTI...");
+        // 1. Fetch and Parse BTI Full Data Feed
+        log.push("Fetching FULL inventory and price data from BTI...");
         const btiCredentials = Buffer.from(`${BTI_USERNAME}:${BTI_PASSWORD}`).toString('base64');
-        const btiResponse = await fetch(BTI_INVENTORY_URL, { headers: { 'Authorization': `Basic ${btiCredentials}` } });
+        const btiResponse = await fetch(BTI_FULL_DATA_URL, { headers: { 'Authorization': `Basic ${btiCredentials}` } });
         if (!btiResponse.ok) throw new Error(`BTI connection failed: ${btiResponse.status}`);
         const csvText = await btiResponse.text();
         const records = parse(csvText, { columns: true, skip_empty_lines: true });
-        const btiStockMap = new Map(records.map(r => [r.id, parseInt(r.available, 10) || 0]));
-        log.push(`Successfully parsed ${btiStockMap.size} items from BTI feed.`);
+        
+        const btiDataMap = new Map(records.map(r => [r.id, {
+            available: parseInt(r.available, 10) || 0,
+            cost: parseFloat(r.your_price) || 0,
+            msrp: parseFloat(r.msrp) || 0,
+        }]));
+        log.push(`Successfully parsed ${btiDataMap.size} items from BTI feed.`);
 
         // 2. Fetch all Shopify variants that are linked to BTI
         log.push("Fetching all Shopify variants with a BTI part number...");
@@ -54,54 +61,64 @@ module.exports = async (req, res) => {
         // 3. Process each variant and execute updates
         for (const variant of shopifyVariants) {
             const btiPartNumber = variant.btiPartNumber.value;
-            const btiStock = btiStockMap.get(btiPartNumber) || 0;
-            const shopifyStock = variant.inventoryQuantity;
-            const outOfStockAction = variant.product.outOfStockAction?.value || 'Make Unavailable (Track Inventory)';
-            const isTrulyOutOfStock = shopifyStock <= 0 && btiStock <= 0;
-            const isCurrentlySetToContinueSelling = variant.inventoryPolicy === 'CONTINUE';
-            const variantIdentifier = `${variant.product.title} - ${variant.title}`;
+            const btiData = btiDataMap.get(btiPartNumber);
+            if (!btiData) continue;
 
-            if (outOfStockAction === 'Make Unavailable (Track Inventory)') {
+            const variantIdentifier = `${variant.product.title} - ${variant.title}`;
+            const shopifyStock = variant.inventoryQuantity;
+            const isTrulyOutOfStock = shopifyStock <= 0 && btiData.available <= 0;
+            const isCurrentlySetToContinueSelling = variant.inventoryPolicy === 'CONTINUE';
+            
+            if (variant.product.outOfStockAction?.value === 'Make Unavailable (Track Inventory)' || !variant.product.outOfStockAction?.value) {
                 if (isTrulyOutOfStock && isCurrentlySetToContinueSelling) {
                     await updateVariantInventoryPolicy(variant.id, 'deny');
-                    log.push(` -> ACTION: Made variant "${variantIdentifier}" unavailable (OOS).`);
-                    changesMade.push({ name: variantIdentifier, action: 'Made Unavailable' });
+                    changesMade.availability.push({ name: variantIdentifier, action: 'Made Unavailable' });
                 } else if (!isTrulyOutOfStock && !isCurrentlySetToContinueSelling) {
                     await updateVariantInventoryPolicy(variant.id, 'continue');
-                    log.push(` -> ACTION: Made variant "${variantIdentifier}" available again (Back in Stock).`);
-                    changesMade.push({ name: variantIdentifier, action: 'Made Available' });
+                    changesMade.availability.push({ name: variantIdentifier, action: 'Made Available' });
                 }
-            } else if (outOfStockAction === 'Switch to Special Order Template') {
-                if (!isCurrentlySetToContinueSelling) {
-                    await updateVariantInventoryPolicy(variant.id, 'continue');
-                    log.push(` -> INFO: Ensuring variant "${variantIdentifier}" for Special Order product is sellable.`);
-                    changesMade.push({ name: variantIdentifier, action: 'Made Available' });
+            }
+
+            if (btiData.msrp > 0 && btiData.cost > 0) {
+                const newPrice = (btiData.msrp * 0.99).toFixed(2);
+                const currentPrice = variant.price;
+                const currentCompareAtPrice = variant.compareAtPrice;
+                const currentCost = variant.inventoryItem.unitCost?.amount;
+
+                if (newPrice !== currentPrice || btiData.msrp.toFixed(2) !== currentCompareAtPrice || btiData.cost.toFixed(2) !== currentCost) {
+                    await updateVariantPricing(variant.id, variant.inventoryItem.id, newPrice, btiData.msrp.toFixed(2), btiData.cost.toFixed(2));
+                    changesMade.pricing.push({ name: variantIdentifier, oldPrice: currentPrice, newPrice: newPrice, oldCost: currentCost, newCost: btiData.cost.toFixed(2) });
                 }
             }
         }
         
         // 4. Generate and Send Sync Report
-        if (changesMade.length > 0) {
-            log.push(`Found ${changesMade.length} changes to report. Generating email.`);
-            let reportHtml = `<h1>BTI Inventory Sync Report</h1><p>...</p>`;
-            const unavailableItems = changesMade.filter(c => c.action === 'Made Unavailable');
-            if (unavailableItems.length > 0) {
-                reportHtml += `<hr><h3>Made Unavailable (Out of Stock)</h3><ul>${unavailableItems.map(item => `<li>${item.name}</li>`).join('')}</ul>`;
+        const totalChanges = changesMade.availability.length + changesMade.pricing.length;
+        if (totalChanges > 0) {
+            let reportHtml = `<h1>BTI Inventory & Price Sync Report</h1><p>Sync completed. ${totalChanges} total changes were made.</p>`;
+            
+            if (changesMade.availability.length > 0) {
+                reportHtml += `<hr><h3>Availability Updates (${changesMade.availability.length})</h3><ul>`;
+                changesMade.availability.forEach(item => { reportHtml += `<li><b>${item.action}:</b> ${item.name}</li>`; });
+                reportHtml += `</ul>`;
             }
-            const availableItems = changesMade.filter(c => c.action === 'Made Available');
-            if (availableItems.length > 0) {
-                reportHtml += `<hr><h3>Made Available (Back in Stock)</h3><ul>${availableItems.map(item => `<li>${item.name}</li>`).join('')}</ul>`;
+
+            if (changesMade.pricing.length > 0) {
+                reportHtml += `<hr><h3>Pricing Updates (${changesMade.pricing.length})</h3><ul>`;
+                changesMade.pricing.forEach(item => { reportHtml += `<li><b>${item.name}</b><br> - Price: ${item.oldPrice} -> ${item.newPrice}<br> - Cost: ${item.oldCost || 'N/A'} -> ${item.newCost}</li>`; });
+                reportHtml += `</ul>`;
             }
+
             await resend.emails.send({
                 from: 'LoamLabs BTI Sync <info@loamlabsusa.com>', to: REPORT_EMAIL_TO,
-                subject: `BTI Sync Report: ${changesMade.length} Variants Updated`,
+                subject: `BTI Sync Report: ${totalChanges} Updates Made`,
                 html: reportHtml,
             });
             log.push("Sync report email sent successfully.");
         } else {
             log.push("Sync complete. No changes were needed.");
         }
-        message = `Sync complete. Processed ${shopifyVariants.length} variants. ${changesMade.length} changes made.`;
+        message = `Sync complete. Processed ${shopifyVariants.length} variants. ${totalChanges} changes made.`;
 
     } catch (error) {
         console.error("An error occurred during the BTI sync:", error);
@@ -122,7 +139,8 @@ async function getAllShopifyVariants() {
       productVariants(first: 250, after: $cursor) {
         edges {
           node {
-            id, title, inventoryQuantity, inventoryPolicy
+            id, title, price, compareAtPrice, inventoryQuantity, inventoryPolicy
+            inventoryItem { id, unitCost { amount } }
             btiPartNumber: metafield(namespace: "custom", key: "bti_part_number") { value }
             product {
               id, title
@@ -147,24 +165,36 @@ async function getAllShopifyVariants() {
     return allVariants.filter(variant => variant.btiPartNumber && variant.btiPartNumber.value);
 }
 
-// ----- THIS IS THE PROVEN, RELIABLE REST API FUNCTION -----
 async function updateVariantInventoryPolicy(variantGid, policy) {
     const variantId = variantGid.split('/').pop();
     const client = new shopify.clients.Rest({ session: getSession() });
-    
-    const response = await client.put({
+    await client.put({
         path: `variants/${variantId}`,
-        data: {
-            variant: {
-                id: variantId,
-                inventory_policy: policy // 'deny' or 'continue'
-            }
-        },
+        data: { variant: { id: variantId, inventory_policy: policy } },
     });
+}
 
-    if (!response.ok) {
-        console.error("Error updating variant policy via REST:", response.body);
-    }
+async function updateVariantPricing(variantGid, inventoryItemId, price, compareAtPrice, cost) {
+    const client = new shopify.clients.Graphql({ session: getSession() });
+    await client.query({
+        data: {
+            query: `mutation productVariantUpdate($input: ProductVariantInput!) {
+                productVariantUpdate(input: $input) {
+                    productVariant { id } userErrors { field message }
+                }
+            }`,
+            variables: {
+                input: {
+                    id: variantGid,
+                    price: price,
+                    compareAtPrice: compareAtPrice,
+                    inventoryItem: {
+                        cost: cost
+                    }
+                }
+            }
+        }
+    });
 }
 
 function getSession() {
