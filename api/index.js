@@ -52,7 +52,7 @@ module.exports = async (req, res) => {
         const shopifyVariants = await getAllShopifyVariants();
         log.push(`Found ${shopifyVariants.length} Shopify variants to process.`);
 
-        const updatePromises = []; // Array to hold all our update tasks
+        const updatePromises = [];
 
         for (const variant of shopifyVariants) {
             const btiPartNumber = variant.btiPartNumber.value;
@@ -60,10 +60,11 @@ module.exports = async (req, res) => {
             if (!btiData) continue;
 
             const variantIdentifier = `${variant.product.title} - ${variant.title}`;
+            
+            // --- Inventory Logic ---
             const shopifyStock = variant.inventoryQuantity;
             const isTrulyOutOfStock = shopifyStock <= 0 && btiData.available <= 0;
             const isCurrentlySetToContinueSelling = variant.inventoryPolicy === 'CONTINUE';
-            
             if (variant.product.outOfStockAction?.value === 'Make Unavailable (Track Inventory)' || !variant.product.outOfStockAction?.value) {
                 if (isTrulyOutOfStock && isCurrentlySetToContinueSelling) {
                     updatePromises.push(updateVariant(variant.id, { inventory_policy: 'deny' }));
@@ -74,33 +75,49 @@ module.exports = async (req, res) => {
                 }
             }
 
+            // --- Pricing Logic ---
             const isPriceSyncExcluded = variant.product.excludeFromPriceSync?.value === true;
             if (isPriceSyncExcluded) continue;
 
             if (btiData.msrp > 0 && btiData.cost > 0) {
-                const newPrice = (btiData.msrp * 0.99).toFixed(2);
-                if (newPrice !== variant.price || btiData.msrp.toFixed(2) !== variant.compareAtPrice || btiData.cost.toFixed(2) !== variant.inventoryItem.unitCost?.amount) {
-                    updatePromises.push(updateVariant(variant.id, { price: newPrice, compare_at_price: btiData.msrp.toFixed(2) }));
-                    updatePromises.push(updateInventoryItem(variant.inventoryItem.id, { cost: btiData.cost.toFixed(2) }));
-                    changesMade.pricing.push({ name: variantIdentifier, oldPrice: variant.price, newPrice: newPrice, oldCost: variant.inventoryItem.unitCost?.amount, newCost: btiData.cost.toFixed(2) });
+                let newPrice;
+                let newCompareAtPrice;
+                const priceAdjustmentPct = variant.product.priceAdjustmentPercentage?.value;
+
+                if (priceAdjustmentPct != null) {
+                    const adjustment = 1 + (parseInt(priceAdjustmentPct, 10) / 100);
+                    newPrice = (btiData.msrp * adjustment).toFixed(2);
+                    newCompareAtPrice = newPrice;
+                } else {
+                    newPrice = (btiData.msrp * 0.99).toFixed(2);
+                    newCompareAtPrice = btiData.msrp.toFixed(2);
+                }
+
+                const newCost = btiData.cost.toFixed(2);
+                const currentCost = variant.inventoryItem.unitCost?.amount;
+
+                if (newPrice !== variant.price || newCompareAtPrice !== variant.compareAtPrice || newCost !== currentCost) {
+                    updatePromises.push(updateVariant(variant.id, { price: newPrice, compare_at_price: newCompareAtPrice }));
+                    updatePromises.push(updateInventoryItem(variant.inventoryItem.id, { cost: newCost }));
+                    changesMade.pricing.push({ name: variantIdentifier, oldPrice: variant.price, newPrice: newPrice, oldCost: currentCost, newCost: newCost });
                 }
             }
         }
         
         log.push(`Found ${updatePromises.length} total API updates to perform. Executing in parallel...`);
-        await Promise.all(updatePromises); // This runs all updates at once
+        await Promise.all(updatePromises);
         log.push("All API updates completed.");
 
         const totalChanges = changesMade.availability.length + changesMade.pricing.length;
         if (totalChanges > 0) {
-            // ... (Email building logic remains the same) ...
+            // ... Email building logic ...
         } else {
             log.push("Sync complete. No changes were needed.");
         }
         message = `Sync complete. Processed ${shopifyVariants.length} variants. ${totalChanges} changes made.`;
 
     } catch (error) {
-        // ... (Error handling remains the same) ...
+        // ... Error handling logic ...
     }
     
     console.log(log.join('\n'));
@@ -121,6 +138,7 @@ async function getAllShopifyVariants() {
               id, title
               outOfStockAction: metafield(namespace: "custom", key: "out_of_stock_action") { value }
               excludeFromPriceSync: metafield(namespace: "custom", key: "exclude_from_price_sync") { value }
+              priceAdjustmentPercentage: metafield(namespace: "custom", key: "price_adjustment_percentage") { value }
             }
           }
         }
@@ -141,11 +159,9 @@ async function getAllShopifyVariants() {
     return allVariants.filter(variant => variant.btiPartNumber && variant.btiPartNumber.value);
 }
 
-// --- NEW, UNIFIED REST API UPDATE FUNCTION ---
 async function updateVariant(variantGid, updates) {
     const variantId = variantGid.split('/').pop();
     const client = new shopify.clients.Rest({ session: getSession() });
-    
     await client.put({
         path: `variants/${variantId}`,
         data: { variant: { id: variantId, ...updates } },
@@ -155,7 +171,6 @@ async function updateVariant(variantGid, updates) {
 async function updateInventoryItem(inventoryItemGid, updates) {
     const inventoryItemId = inventoryItemGid.split('/').pop();
     const client = new shopify.clients.Rest({ session: getSession() });
-    
     await client.put({
         path: `inventory_items/${inventoryItemId}`,
         data: { inventory_item: { id: inventoryItemId, ...updates } },
