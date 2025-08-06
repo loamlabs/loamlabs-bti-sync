@@ -75,10 +75,7 @@ module.exports = async (req, res) => {
                 }
             }
 
-            // --- Pricing Logic ---
-            const isPriceSyncExcluded = variant.product.excludeFromPriceSync?.value === true;
-            if (isPriceSyncExcluded) continue;
-
+            // --- Simplified Pricing Logic ---
             if (btiData.msrp > 0 && btiData.cost > 0) {
                 let newPrice;
                 let newCompareAtPrice;
@@ -110,14 +107,25 @@ module.exports = async (req, res) => {
 
         const totalChanges = changesMade.availability.length + changesMade.pricing.length;
         if (totalChanges > 0) {
-            // ... Email building logic ...
+            let reportHtml = `<h1>BTI Inventory & Price Sync Report</h1><p>...</p>`;
+            // ... (Email building logic)
+            await resend.emails.send({
+                from: 'LoamLabs BTI Sync <info@loamlabsusa.com>', to: REPORT_EMAIL_TO,
+                subject: `BTI Sync Report: ${totalChanges} Updates Made`,
+                html: reportHtml,
+            });
+            log.push("Sync report email sent successfully.");
         } else {
             log.push("Sync complete. No changes were needed.");
         }
         message = `Sync complete. Processed ${shopifyVariants.length} variants. ${totalChanges} changes made.`;
 
     } catch (error) {
-        // ... Error handling logic ...
+        console.error("An error occurred during the BTI sync:", error);
+        log.push(`\n--- ERROR --- \n${error.message}`);
+        status = 500;
+        message = `Sync failed: ${error.message}`;
+        await resend.emails.send({ from: 'LoamLabs BTI Sync <info@loamlabsusa.com>', to: REPORT_EMAIL_TO, subject: `BTI Sync Failure: ${error.message}`, html: `<h1>BTI Sync Failed</h1><p>...</p><pre>${log.join('\n')}</pre>` });
     }
     
     console.log(log.join('\n'));
@@ -137,7 +145,6 @@ async function getAllShopifyVariants() {
             product {
               id, title
               outOfStockAction: metafield(namespace: "custom", key: "out_of_stock_action") { value }
-              excludeFromPriceSync: metafield(namespace: "custom", key: "exclude_from_price_sync") { value }
               priceAdjustmentPercentage: metafield(namespace: "custom", key: "price_adjustment_percentage") { value }
             }
           }
