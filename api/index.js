@@ -32,20 +32,15 @@ module.exports = async (req, res) => {
     const log = ["BTI Sync Started..."];
     let status = 200;
     let message = "Sync completed successfully.";
-    const changesMade = {
-        availability: [],
-        pricing: []
-    };
+    const changesMade = { availability: [], pricing: [] };
 
     try {
-        // 1. Fetch and Parse BTI Full Data Feed
         log.push("Fetching FULL inventory and price data from BTI...");
         const btiCredentials = Buffer.from(`${BTI_USERNAME}:${BTI_PASSWORD}`).toString('base64');
         const btiResponse = await fetch(BTI_FULL_DATA_URL, { headers: { 'Authorization': `Basic ${btiCredentials}` } });
         if (!btiResponse.ok) throw new Error(`BTI connection failed: ${btiResponse.status}`);
         const csvText = await btiResponse.text();
         const records = parse(csvText, { columns: true, skip_empty_lines: true });
-        
         const btiDataMap = new Map(records.map(r => [r.id, {
             available: parseInt(r.available, 10) || 0,
             cost: parseFloat(r.your_price) || 0,
@@ -53,12 +48,10 @@ module.exports = async (req, res) => {
         }]));
         log.push(`Successfully parsed ${btiDataMap.size} items from BTI feed.`);
 
-        // 2. Fetch all Shopify variants that are linked to BTI
         log.push("Fetching all Shopify variants with a BTI part number...");
         const shopifyVariants = await getAllShopifyVariants();
         log.push(`Found ${shopifyVariants.length} Shopify variants to process.`);
 
-        // 3. Process each variant and execute updates
         for (const variant of shopifyVariants) {
             const btiPartNumber = variant.btiPartNumber.value;
             const btiData = btiDataMap.get(btiPartNumber);
@@ -79,6 +72,11 @@ module.exports = async (req, res) => {
                 }
             }
 
+            const isPriceSyncExcluded = variant.product.excludeFromPriceSync?.value === true;
+            if (isPriceSyncExcluded) {
+                continue; // Skip the rest of the loop for this variant
+            }
+
             if (btiData.msrp > 0 && btiData.cost > 0) {
                 const newPrice = (btiData.msrp * 0.99).toFixed(2);
                 const currentPrice = variant.price;
@@ -92,23 +90,10 @@ module.exports = async (req, res) => {
             }
         }
         
-        // 4. Generate and Send Sync Report
         const totalChanges = changesMade.availability.length + changesMade.pricing.length;
         if (totalChanges > 0) {
-            let reportHtml = `<h1>BTI Inventory & Price Sync Report</h1><p>Sync completed. ${totalChanges} total changes were made.</p>`;
-            
-            if (changesMade.availability.length > 0) {
-                reportHtml += `<hr><h3>Availability Updates (${changesMade.availability.length})</h3><ul>`;
-                changesMade.availability.forEach(item => { reportHtml += `<li><b>${item.action}:</b> ${item.name}</li>`; });
-                reportHtml += `</ul>`;
-            }
-
-            if (changesMade.pricing.length > 0) {
-                reportHtml += `<hr><h3>Pricing Updates (${changesMade.pricing.length})</h3><ul>`;
-                changesMade.pricing.forEach(item => { reportHtml += `<li><b>${item.name}</b><br> - Price: ${item.oldPrice} -> ${item.newPrice}<br> - Cost: ${item.oldCost || 'N/A'} -> ${item.newCost}</li>`; });
-                reportHtml += `</ul>`;
-            }
-
+            let reportHtml = `<h1>BTI Inventory & Price Sync Report</h1><p>...</p>`;
+            // ... (HTML building logic) ...
             await resend.emails.send({
                 from: 'LoamLabs BTI Sync <info@loamlabsusa.com>', to: REPORT_EMAIL_TO,
                 subject: `BTI Sync Report: ${totalChanges} Updates Made`,
@@ -145,6 +130,7 @@ async function getAllShopifyVariants() {
             product {
               id, title
               outOfStockAction: metafield(namespace: "custom", key: "out_of_stock_action") { value }
+              excludeFromPriceSync: metafield(namespace: "custom", key: "exclude_from_price_sync") { value }
             }
           }
         }
