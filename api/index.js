@@ -52,6 +52,8 @@ module.exports = async (req, res) => {
         const shopifyVariants = await getAllShopifyVariants();
         log.push(`Found ${shopifyVariants.length} Shopify variants to process.`);
 
+        const updatePromises = []; // Array to hold all our update tasks
+
         for (const variant of shopifyVariants) {
             const btiPartNumber = variant.btiPartNumber.value;
             const btiData = btiDataMap.get(btiPartNumber);
@@ -64,10 +66,10 @@ module.exports = async (req, res) => {
             
             if (variant.product.outOfStockAction?.value === 'Make Unavailable (Track Inventory)' || !variant.product.outOfStockAction?.value) {
                 if (isTrulyOutOfStock && isCurrentlySetToContinueSelling) {
-                    await updateVariant(variant.id, { inventory_policy: 'deny' });
+                    updatePromises.push(updateVariant(variant.id, { inventory_policy: 'deny' }));
                     changesMade.availability.push({ name: variantIdentifier, action: 'Made Unavailable' });
                 } else if (!isTrulyOutOfStock && !isCurrentlySetToContinueSelling) {
-                    await updateVariant(variant.id, { inventory_policy: 'continue' });
+                    updatePromises.push(updateVariant(variant.id, { inventory_policy: 'continue' }));
                     changesMade.availability.push({ name: variantIdentifier, action: 'Made Available' });
                 }
             }
@@ -78,28 +80,27 @@ module.exports = async (req, res) => {
             if (btiData.msrp > 0 && btiData.cost > 0) {
                 const newPrice = (btiData.msrp * 0.99).toFixed(2);
                 if (newPrice !== variant.price || btiData.msrp.toFixed(2) !== variant.compareAtPrice || btiData.cost.toFixed(2) !== variant.inventoryItem.unitCost?.amount) {
-                    await updateVariant(variant.id, {
-                        price: newPrice,
-                        compare_at_price: btiData.msrp.toFixed(2),
-                    });
-                    await updateInventoryItem(variant.inventoryItem.id, {
-                        cost: btiData.cost.toFixed(2),
-                    });
+                    updatePromises.push(updateVariant(variant.id, { price: newPrice, compare_at_price: btiData.msrp.toFixed(2) }));
+                    updatePromises.push(updateInventoryItem(variant.inventoryItem.id, { cost: btiData.cost.toFixed(2) }));
                     changesMade.pricing.push({ name: variantIdentifier, oldPrice: variant.price, newPrice: newPrice, oldCost: variant.inventoryItem.unitCost?.amount, newCost: btiData.cost.toFixed(2) });
                 }
             }
         }
         
+        log.push(`Found ${updatePromises.length} total API updates to perform. Executing in parallel...`);
+        await Promise.all(updatePromises); // This runs all updates at once
+        log.push("All API updates completed.");
+
         const totalChanges = changesMade.availability.length + changesMade.pricing.length;
         if (totalChanges > 0) {
-            // ... (Email building logic is correct and remains the same)
+            // ... (Email building logic remains the same) ...
         } else {
             log.push("Sync complete. No changes were needed.");
         }
         message = `Sync complete. Processed ${shopifyVariants.length} variants. ${totalChanges} changes made.`;
 
     } catch (error) {
-        // ... (Error handling is correct and remains the same)
+        // ... (Error handling remains the same) ...
     }
     
     console.log(log.join('\n'));
