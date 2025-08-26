@@ -17,7 +17,7 @@ const {
 // Initialize clients
 const shopify = shopifyApi.shopifyApi({
   apiKey: 'temp_key', apiSecretKey: 'temp_secret',
-  scopes: ['read_products', 'write_products'],
+  scopes: ['read_products', 'write_products', 'write_inventory'], // Added write_inventory scope
   hostName: SHOPIFY_STORE_DOMAIN.replace('https://', ''),
   apiVersion: shopifyApi.LATEST_API_VERSION,
   isEmbeddedApp: false, isCustomStoreApp: true,
@@ -49,7 +49,8 @@ module.exports = async (req, res) => {
         log.push(`Successfully parsed ${btiDataMap.size} items from BTI feed.`);
 
         log.push("Fetching all Shopify variants with a BTI part number...");
-        const shopifyVariants = await getAllShopifyVariants();
+        // *** FIX #1: This now uses the efficient, targeted query ***
+        const shopifyVariants = await getBtiLinkedShopifyVariants();
         log.push(`Found ${shopifyVariants.length} Shopify variants to process.`);
 
         const updatePromises = [];
@@ -67,10 +68,11 @@ module.exports = async (req, res) => {
             const isCurrentlySetToContinueSelling = variant.inventoryPolicy === 'CONTINUE';
             if (variant.product.outOfStockAction?.value === 'Make Unavailable (Track Inventory)' || !variant.product.outOfStockAction?.value) {
                 if (isTrulyOutOfStock && isCurrentlySetToContinueSelling) {
-                    updatePromises.push(updateVariant(variant.id, { inventory_policy: 'deny' }));
+                    // *** FIX #2: Migrated to modern GraphQL mutation ***
+                    updatePromises.push(updateVariantInventoryPolicy(variant.id, 'DENY'));
                     changesMade.availability.push({ name: variantIdentifier, action: 'Made Unavailable' });
                 } else if (!isTrulyOutOfStock && !isCurrentlySetToContinueSelling) {
-                    updatePromises.push(updateVariant(variant.id, { inventory_policy: 'continue' }));
+                    updatePromises.push(updateVariantInventoryPolicy(variant.id, 'CONTINUE'));
                     changesMade.availability.push({ name: variantIdentifier, action: 'Made Available' });
                 }
             }
@@ -94,8 +96,8 @@ module.exports = async (req, res) => {
                 const currentCost = variant.inventoryItem.unitCost?.amount;
 
                 if (newPrice !== variant.price || newCompareAtPrice !== variant.compareAtPrice || newCost !== currentCost) {
-                    updatePromises.push(updateVariant(variant.id, { price: newPrice, compare_at_price: newCompareAtPrice }));
-                    updatePromises.push(updateInventoryItem(variant.inventoryItem.id, { cost: newCost }));
+                    // *** FIX #2: Migrated to modern GraphQL mutation ***
+                    updatePromises.push(updateVariantPricing(variant.id, newPrice, newCompareAtPrice, newCost));
                     changesMade.pricing.push({ name: variantIdentifier, oldPrice: variant.price, newPrice: newPrice, oldCost: currentCost, newCost: newCost });
                 }
             }
@@ -107,8 +109,14 @@ module.exports = async (req, res) => {
 
         const totalChanges = changesMade.availability.length + changesMade.pricing.length;
         if (totalChanges > 0) {
-            let reportHtml = `<h1>BTI Inventory & Price Sync Report</h1><p>...</p>`;
-            // ... (Email building logic)
+            // This logic remains the same
+            let reportHtml = `<h1>BTI Inventory & Price Sync Report</h1>`;
+            if (changesMade.availability.length > 0) {
+                reportHtml += `<h2>Availability Updates</h2><ul>${changesMade.availability.map(c => `<li><b>${c.name}</b>: ${c.action}</li>`).join('')}</ul>`;
+            }
+            if (changesMade.pricing.length > 0) {
+                reportHtml += `<h2>Pricing Updates</h2><ul>${changesMade.pricing.map(c => `<li><b>${c.name}</b>: Price changed from $${c.oldPrice} to $${c.newPrice} (Cost: $${c.newCost})</li>`).join('')}</ul>`;
+            }
             await resend.emails.send({
                 from: 'LoamLabs BTI Sync <info@loamlabsusa.com>', to: REPORT_EMAIL_TO,
                 subject: `BTI Sync Report: ${totalChanges} Updates Made`,
@@ -125,7 +133,7 @@ module.exports = async (req, res) => {
         log.push(`\n--- ERROR --- \n${error.message}`);
         status = 500;
         message = `Sync failed: ${error.message}`;
-        await resend.emails.send({ from: 'LoamLabs BTI Sync <info@loamlabsusa.com>', to: REPORT_EMAIL_TO, subject: `BTI Sync Failure: ${error.message}`, html: `<h1>BTI Sync Failed</h1><p>...</p><pre>${log.join('\n')}</pre>` });
+        await resend.emails.send({ from: 'LoamLabs BTI Sync <info@loamlabsusa.com>', to: REPORT_EMAIL_TO, subject: `BTI Sync Failure: ${error.message}`, html: `<h1>BTI Sync Failed</h1><p>The sync process encountered a critical error. Please check the Vercel logs for details.</p><pre>${log.join('\n')}</pre>` });
     }
     
     console.log(log.join('\n'));
@@ -133,10 +141,12 @@ module.exports = async (req, res) => {
 };
 
 // --- SHOPIFY API HELPER FUNCTIONS ---
-async function getAllShopifyVariants() {
+
+// *** FIX #1: THIS IS THE NEW, EFFICIENT QUERY ***
+async function getBtiLinkedShopifyVariants() {
     const query = `
-    query($cursor: String) {
-      productVariants(first: 250, after: $cursor) {
+    query($cursor: String, $query: String!) {
+      productVariants(first: 250, after: $cursor, query: $query) {
         edges {
           node {
             id, title, price, compareAtPrice, inventoryQuantity, inventoryPolicy
@@ -152,37 +162,73 @@ async function getAllShopifyVariants() {
         pageInfo { hasNextPage, endCursor }
       }
     }`;
+    // *** This now uses the modern .request method ***
     const client = new shopify.clients.Graphql({ session: getSession() });
     let allVariants = [];
     let hasNextPage = true; let cursor = null;
     do {
-        const response = await client.query({ data: { query, variables: { cursor } } });
-        if (!response.body.data.productVariants) { break; }
-        const pageData = response.body.data.productVariants;
+        const response = await client.request({ 
+            data: { 
+                query, 
+                variables: { 
+                    cursor,
+                    // The magic is here: we tell Shopify to pre-filter for us
+                    query: "metafield:custom.bti_part_number:''" 
+                } 
+            } 
+        });
+        if (!response.data.productVariants) { break; }
+        const pageData = response.data.productVariants;
         allVariants.push(...pageData.edges.map(edge => edge.node));
         hasNextPage = pageData.pageInfo.hasNextPage;
         cursor = pageData.pageInfo.endCursor;
     } while (hasNextPage);
-    return allVariants.filter(variant => variant.btiPartNumber && variant.btiPartNumber.value);
+    // The final .filter() is no longer needed as Shopify does the work
+    return allVariants;
 }
 
-async function updateVariant(variantGid, updates) {
-    const variantId = variantGid.split('/').pop();
-    const client = new shopify.clients.Rest({ session: getSession() });
-    await client.put({
-        path: `variants/${variantId}`,
-        data: { variant: { id: variantId, ...updates } },
+// *** FIX #2: NEW GraphQL-based update functions ***
+async function updateVariantInventoryPolicy(variantGid, policy) {
+    const mutation = `
+    mutation productVariantUpdate($input: ProductVariantInput!) {
+        productVariantUpdate(input: $input) {
+            productVariant { id, inventoryPolicy }
+            userErrors { field, message }
+        }
+    }`;
+    const client = new shopify.clients.Graphql({ session: getSession() });
+    await client.request({
+        data: {
+            query: mutation,
+            variables: { input: { id: variantGid, inventoryPolicy: policy } }
+        }
     });
 }
 
-async function updateInventoryItem(inventoryItemGid, updates) {
-    const inventoryItemId = inventoryItemGid.split('/').pop();
-    const client = new shopify.clients.Rest({ session: getSession() });
-    await client.put({
-        path: `inventory_items/${inventoryItemId}`,
-        data: { inventory_item: { id: inventoryItemId, ...updates } },
+async function updateVariantPricing(variantGid, price, compareAtPrice, cost) {
+    const mutation = `
+    mutation productVariantUpdate($input: ProductVariantInput!) {
+        productVariantUpdate(input: $input) {
+            productVariant { id, price, compareAtPrice }
+            userErrors { field, message }
+        }
+    }`;
+    const client = new shopify.clients.Graphql({ session: getSession() });
+    await client.request({
+        data: {
+            query: mutation,
+            variables: {
+                input: {
+                    id: variantGid,
+                    price: price,
+                    compareAtPrice: compareAtPrice,
+                    inventoryItem: { cost: cost }
+                }
+            }
+        }
     });
 }
+
 
 function getSession() {
     return {
