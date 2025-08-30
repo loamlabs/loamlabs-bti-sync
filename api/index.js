@@ -17,7 +17,7 @@ const {
 // Initialize clients
 const shopify = shopifyApi.shopifyApi({
   apiKey: 'temp_key', apiSecretKey: 'temp_secret',
-  scopes: ['read_products', 'write_products', 'write_inventory'], // Added write_inventory scope
+  scopes: ['read_products', 'write_products', 'write_inventory'],
   hostName: SHOPIFY_STORE_DOMAIN.replace('https://', ''),
   apiVersion: shopifyApi.LATEST_API_VERSION,
   isEmbeddedApp: false, isCustomStoreApp: true,
@@ -49,7 +49,6 @@ module.exports = async (req, res) => {
         log.push(`Successfully parsed ${btiDataMap.size} items from BTI feed.`);
 
         log.push("Fetching all Shopify variants with a BTI part number...");
-        // *** FIX #1: This now uses the efficient, targeted query ***
         const shopifyVariants = await getBtiLinkedShopifyVariants();
         log.push(`Found ${shopifyVariants.length} Shopify variants to process.`);
 
@@ -62,13 +61,11 @@ module.exports = async (req, res) => {
 
             const variantIdentifier = `${variant.product.title} - ${variant.title}`;
             
-            // --- Inventory Logic ---
             const shopifyStock = variant.inventoryQuantity;
             const isTrulyOutOfStock = shopifyStock <= 0 && btiData.available <= 0;
             const isCurrentlySetToContinueSelling = variant.inventoryPolicy === 'CONTINUE';
             if (variant.product.outOfStockAction?.value === 'Make Unavailable (Track Inventory)' || !variant.product.outOfStockAction?.value) {
                 if (isTrulyOutOfStock && isCurrentlySetToContinueSelling) {
-                    // *** FIX #2: Migrated to modern GraphQL mutation ***
                     updatePromises.push(updateVariantInventoryPolicy(variant.id, 'DENY'));
                     changesMade.availability.push({ name: variantIdentifier, action: 'Made Unavailable' });
                 } else if (!isTrulyOutOfStock && !isCurrentlySetToContinueSelling) {
@@ -77,7 +74,6 @@ module.exports = async (req, res) => {
                 }
             }
 
-            // --- Simplified Pricing Logic ---
             if (btiData.msrp > 0 && btiData.cost > 0) {
                 let newPrice;
                 let newCompareAtPrice;
@@ -96,7 +92,6 @@ module.exports = async (req, res) => {
                 const currentCost = variant.inventoryItem.unitCost?.amount;
 
                 if (newPrice !== variant.price || newCompareAtPrice !== variant.compareAtPrice || newCost !== currentCost) {
-                    // *** FIX #2: Migrated to modern GraphQL mutation ***
                     updatePromises.push(updateVariantPricing(variant.id, newPrice, newCompareAtPrice, newCost));
                     changesMade.pricing.push({ name: variantIdentifier, oldPrice: variant.price, newPrice: newPrice, oldCost: currentCost, newCost: newCost });
                 }
@@ -109,7 +104,6 @@ module.exports = async (req, res) => {
 
         const totalChanges = changesMade.availability.length + changesMade.pricing.length;
         if (totalChanges > 0) {
-            // This logic remains the same
             let reportHtml = `<h1>BTI Inventory & Price Sync Report</h1>`;
             if (changesMade.availability.length > 0) {
                 reportHtml += `<h2>Availability Updates</h2><ul>${changesMade.availability.map(c => `<li><b>${c.name}</b>: ${c.action}</li>`).join('')}</ul>`;
@@ -129,8 +123,20 @@ module.exports = async (req, res) => {
         message = `Sync complete. Processed ${shopifyVariants.length} variants. ${totalChanges} changes made.`;
 
     } catch (error) {
-        console.error("An error occurred during the BTI sync:", error);
-        log.push(`\n--- ERROR --- \n${error.message}`);
+        console.error("--- CRITICAL ERROR in BTI SYNC ---");
+        console.error(error); // Log the full error object
+
+        // --- NEW DETAILED DEBUGGING LOGIC ---
+        // This will extract and print the hidden error message from Shopify's response.
+        if (error.response && error.response.body && error.response.body.errors) {
+            const detailedErrors = JSON.stringify(error.response.body.errors, null, 2);
+            console.error("--- DETAILED SHOPIFY API ERRORS ---");
+            console.error(detailedErrors);
+            log.push("\n--- DETAILED SHOPIFY API ERRORS ---\n" + detailedErrors);
+        }
+        // --- END DETAILED DEBUGGING LOGIC ---
+
+        log.push(`\n--- ERROR MESSAGE --- \n${error.message}`);
         status = 500;
         message = `Sync failed: ${error.message}`;
         await resend.emails.send({ from: 'LoamLabs BTI Sync <info@loamlabsusa.com>', to: REPORT_EMAIL_TO, subject: `BTI Sync Failure: ${error.message}`, html: `<h1>BTI Sync Failed</h1><p>The sync process encountered a critical error. Please check the Vercel logs for details.</p><pre>${log.join('\n')}</pre>` });
@@ -142,9 +148,7 @@ module.exports = async (req, res) => {
 
 // --- SHOPIFY API HELPER FUNCTIONS ---
 
-// *** #1: THIS IS THE NEW, EFFICIENT QUERY ***
 async function getBtiLinkedShopifyVariants() {
-    // We have simplified the query to remove the complex 'query' argument that was failing.
     const query = `
     query($cursor: String) {
       productVariants(first: 250, after: $cursor) {
@@ -169,7 +173,6 @@ async function getBtiLinkedShopifyVariants() {
     let hasNextPage = true; let cursor = null;
     
     do {
-        // The request is now much simpler and does not contain the failing 'query' variable.
         const response = await client.request({ 
             data: { 
                 query, 
@@ -183,11 +186,9 @@ async function getBtiLinkedShopifyVariants() {
         cursor = pageData.pageInfo.endCursor;
     } while (hasNextPage);
     
-    // We now perform the filtering ourselves, which is much more reliable.
     return allVariants.filter(variant => variant.btiPartNumber && variant.btiPartNumber.value);
 }
 
-// *** #2: NEW GraphQL-based update functions ***
 async function updateVariantInventoryPolicy(variantGid, policy) {
     const mutation = `
     mutation productVariantUpdate($input: ProductVariantInput!) {
@@ -236,6 +237,8 @@ function getSession() {
         shop: SHOPIFY_STORE_DOMAIN,
         accessToken: SHOPIFY_ADMIN_API_TOKEN,
         state: 'not-used',
-        isOnline: true,
+        // --- THIS IS THE FIX ---
+        // A server-to-server background job like this should use an "offline" session.
+        isOnline: false, 
     };
 }
