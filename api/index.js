@@ -156,6 +156,7 @@ async function getBtiLinkedShopifyVariants() {
 }
 
 async function updateVariantInventoryPolicy(variantGid, policy) {
+    // --- THIS IS THE FIX ---
     const mutation = `
     mutation productVariantUpdate($input: ProductVariantInput!) {
         productVariantUpdate(input: $input) {
@@ -170,6 +171,7 @@ async function updateVariantInventoryPolicy(variantGid, policy) {
 }
 
 async function updateVariantPricing(variantGid, price, compareAtPrice, cost) {
+    // --- THIS IS THE FIX ---
     const mutation = `
     mutation productVariantUpdate($input: ProductVariantInput!) {
         productVariantUpdate(input: $input) {
