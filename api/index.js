@@ -55,9 +55,7 @@ module.exports = async (req, res) => {
             const btiPartNumber = variant.btiPartNumber.value;
             const btiData = btiDataMap.get(btiPartNumber);
             if (!btiData) continue;
-
             const variantIdentifier = `${variant.product.title} - ${variant.title}`;
-            
             const shopifyStock = variant.inventoryQuantity;
             const isTrulyOutOfStock = shopifyStock <= 0 && btiData.available <= 0;
             const isCurrentlySetToContinueSelling = variant.inventoryPolicy === 'CONTINUE';
@@ -70,7 +68,6 @@ module.exports = async (req, res) => {
                     changesMade.availability.push({ name: variantIdentifier, action: 'Made Available' });
                 }
             }
-
             if (btiData.msrp > 0 && btiData.cost > 0) {
                 let newPrice; let newCompareAtPrice;
                 const priceAdjustmentPct = variant.product.priceAdjustmentPercentage?.value;
@@ -84,7 +81,6 @@ module.exports = async (req, res) => {
                 }
                 const newCost = btiData.cost.toFixed(2);
                 const currentCost = variant.inventoryItem.unitCost?.amount;
-
                 if (newPrice !== variant.price || newCompareAtPrice !== variant.compareAtPrice || newCost !== currentCost) {
                     updatePromises.push(updateVariantPricing(variant.id, newPrice, newCompareAtPrice, newCost));
                     changesMade.pricing.push({ name: variantIdentifier, oldPrice: variant.price, newPrice: newPrice, oldCost: currentCost, newCost: newCost });
@@ -150,8 +146,10 @@ async function getBtiLinkedShopifyVariants() {
     let hasNextPage = true; let cursor = null;
     do {
         // --- THIS IS THE FIX ---
-        // The { query, variables } object is passed directly, not nested in a 'data' key.
-        const response = await client.request({ query, variables: { cursor } });
+        // The entire GraphQL query string and variables are passed inside a 'data' object.
+        const response = await client.request({
+            data: { query: query, variables: { cursor } }
+        });
         if (!response.data.productVariants) { break; }
         const pageData = response.data.productVariants;
         allVariants.push(...pageData.edges.map(edge => edge.node));
@@ -172,8 +170,10 @@ async function updateVariantInventoryPolicy(variantGid, policy) {
     const client = new shopify.clients.Graphql({ session: getSession() });
     // --- THIS IS THE FIX ---
     await client.request({
-        query: mutation,
-        variables: { input: { id: variantGid, inventoryPolicy: policy } }
+        data: {
+            query: mutation,
+            variables: { input: { id: variantGid, inventoryPolicy: policy } }
+        }
     });
 }
 
@@ -188,13 +188,15 @@ async function updateVariantPricing(variantGid, price, compareAtPrice, cost) {
     const client = new shopify.clients.Graphql({ session: getSession() });
     // --- THIS IS THE FIX ---
     await client.request({
-        query: mutation,
-        variables: {
-            input: {
-                id: variantGid,
-                price: price,
-                compareAtPrice: compareAtPrice,
-                inventoryItem: { cost: cost }
+        data: {
+            query: mutation,
+            variables: {
+                input: {
+                    id: variantGid,
+                    price: price,
+                    compareAtPrice: compareAtPrice,
+                    inventoryItem: { cost: cost }
+                }
             }
         }
     });
