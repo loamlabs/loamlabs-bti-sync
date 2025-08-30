@@ -190,15 +190,4 @@ async function updateVariantPricing(variantGid, price, compareAtPrice, cost) {
                 inventoryItem: { cost: cost }
             }
         }
-    });
-}
-
-function getSession() {
-    return {
-        id: 'bti-sync-session',
-        shop: SHOPIFY_STORE_DOMAIN,
-        accessToken: SHOPIFY_ADMIN_API_TOKEN,
-        state: 'not-used',
-        isOnline: false, 
-    };
-}
+    
