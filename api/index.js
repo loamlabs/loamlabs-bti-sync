@@ -171,9 +171,9 @@ async function getBtiLinkedShopifyVariants() {
                 query, 
                 variables: { 
                     cursor,
-                    // --- THIS IS THE FIX ---
-                    // The query now correctly searches for the MERE EXISTENCE of the metafield.
-                    query: "metafield:custom.bti_part_number" 
+                    // Using a wildcard (*) tells Shopify to find variants where this metafield has ANY value.
+                    // This is the correct syntax for checking for existence.
+                    query: "metafield:custom.bti_part_number:*" 
                 } 
             } 
         });
@@ -186,7 +186,7 @@ async function getBtiLinkedShopifyVariants() {
     return allVariants;
 }
 
-// *** FIX #2: NEW GraphQL-based update functions ***
+// *** #2: NEW GraphQL-based update functions ***
 async function updateVariantInventoryPolicy(variantGid, policy) {
     const mutation = `
     mutation productVariantUpdate($input: ProductVariantInput!) {
