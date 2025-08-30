@@ -160,7 +160,7 @@ async function updateVariantInventoryPolicy(variantGid, policy) {
     // --- THIS IS THE FIX ---
     // The mutation name and the field inside it are both 'productVariantUpdate'.
     const mutation = `
-    mutation variantUpdate($input: ProductVariantInput!) {
+    mutation productVariantUpdate($input: ProductVariantInput!) {
         productVariantUpdate(input: $input) {
             productVariant { id, inventoryPolicy }
             userErrors { field, message }
@@ -175,7 +175,7 @@ async function updateVariantInventoryPolicy(variantGid, policy) {
 async function updateVariantPricing(variantGid, price, compareAtPrice, cost) {
     // --- THIS IS THE FIX ---
     const mutation = `
-    mutation variantUpdate($input: ProductVariantInput!) {
+    mutation productVariantUpdate($input: ProductVariantInput!) {
         productVariantUpdate(input: $input) {
             productVariant { id, price, compareAtPrice }
             userErrors { field, message }
