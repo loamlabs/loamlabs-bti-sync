@@ -144,9 +144,10 @@ module.exports = async (req, res) => {
 
 // *** #1: THIS IS THE NEW, EFFICIENT QUERY ***
 async function getBtiLinkedShopifyVariants() {
+    // We have simplified the query to remove the complex 'query' argument that was failing.
     const query = `
-    query($cursor: String, $query: String!) {
-      productVariants(first: 250, after: $cursor, query: $query) {
+    query($cursor: String) {
+      productVariants(first: 250, after: $cursor) {
         edges {
           node {
             id, title, price, compareAtPrice, inventoryQuantity, inventoryPolicy
@@ -162,19 +163,17 @@ async function getBtiLinkedShopifyVariants() {
         pageInfo { hasNextPage, endCursor }
       }
     }`;
+    
     const client = new shopify.clients.Graphql({ session: getSession() });
     let allVariants = [];
     let hasNextPage = true; let cursor = null;
+    
     do {
+        // The request is now much simpler and does not contain the failing 'query' variable.
         const response = await client.request({ 
             data: { 
                 query, 
-                variables: { 
-                    cursor,
-                    // Using a wildcard (*) tells Shopify to find variants where this metafield has ANY value.
-                    // This is the correct syntax for checking for existence.
-                    query: "metafield:custom.bti_part_number:*" 
-                } 
+                variables: { cursor } 
             } 
         });
         if (!response.data.productVariants) { break; }
@@ -183,7 +182,9 @@ async function getBtiLinkedShopifyVariants() {
         hasNextPage = pageData.pageInfo.hasNextPage;
         cursor = pageData.pageInfo.endCursor;
     } while (hasNextPage);
-    return allVariants;
+    
+    // We now perform the filtering ourselves, which is much more reliable.
+    return allVariants.filter(variant => variant.btiPartNumber && variant.btiPartNumber.value);
 }
 
 // *** #2: NEW GraphQL-based update functions ***
