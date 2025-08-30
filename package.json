@@ -7,7 +7,7 @@
     "start": "node api/index.js"
   },
   "dependencies": {
-    "@shopify/shopify-api": "^9.3.2",
+    "@shopify/shopify-api": "9.3.2",
     "csv-parse": "^5.5.6",
     "resend": "^3.2.0"
   }
