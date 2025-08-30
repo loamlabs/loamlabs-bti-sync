@@ -16,7 +16,6 @@ const shopify = shopifyApi.shopifyApi({
   apiKey: 'temp_key', apiSecretKey: 'temp_secret',
   scopes: ['read_products', 'write_products', 'write_inventory'],
   hostName: SHOPIFY_STORE_DOMAIN.replace('https://', ''),
-  // --- FIX: Lock to a stable API version ---
   apiVersion: '2024-04',
   isEmbeddedApp: false, isCustomStoreApp: true,
   adminApiAccessToken: SHOPIFY_ADMIN_API_TOKEN,
@@ -147,7 +146,7 @@ async function getBtiLinkedShopifyVariants() {
     let hasNextPage = true; let cursor = null;
     do {
         const response = await client.request(query, { variables: { cursor } });
-        if (!response.data.productVariants) { break; }
+        if (response.data && !response.data.productVariants) { break; }
         const pageData = response.data.productVariants;
         allVariants.push(...pageData.edges.map(edge => edge.node));
         hasNextPage = pageData.pageInfo.hasNextPage;
@@ -157,7 +156,6 @@ async function getBtiLinkedShopifyVariants() {
 }
 
 async function updateVariantInventoryPolicy(variantGid, policy) {
-    // --- THIS IS THE FIX ---
     const mutation = `
     mutation productVariantUpdate($input: ProductVariantInput!) {
         productVariantUpdate(input: $input) {
@@ -172,7 +170,6 @@ async function updateVariantInventoryPolicy(variantGid, policy) {
 }
 
 async function updateVariantPricing(variantGid, price, compareAtPrice, cost) {
-    // --- THIS IS THE FIX ---
     const mutation = `
     mutation productVariantUpdate($input: ProductVariantInput!) {
         productVariantUpdate(input: $input) {
@@ -190,4 +187,15 @@ async function updateVariantPricing(variantGid, price, compareAtPrice, cost) {
                 inventoryItem: { cost: cost }
             }
         }
-    
+    });
+}
+
+function getSession() {
+    return {
+        id: 'bti-sync-session',
+        shop: SHOPIFY_STORE_DOMAIN,
+        accessToken: SHOPIFY_ADMIN_API_TOKEN,
+        state: 'not-used',
+        isOnline: false, 
+    };
+}
