@@ -155,42 +155,43 @@ async function getBtiLinkedShopifyVariants() {
     return allVariants.filter(variant => variant.btiPartNumber && variant.btiPartNumber.value);
 }
 
+// --- THIS IS THE NEW, RELIABLE METHOD ---
+// These functions now use the REST Admin API client.
 async function updateVariantInventoryPolicy(variantGid, policy) {
-    // --- THIS IS THE FIX ---
-    const mutation = `
-    mutation productVariantUpdate($input: ProductVariantInput!) {
-        productVariantUpdate(input: $input) {
-            productVariant { id, inventoryPolicy }
-            userErrors { field, message }
-        }
-    }`;
-    const client = new shopify.clients.Graphql({ session: getSession() });
-    await client.request(mutation, {
-        variables: { input: { id: variantGid, inventoryPolicy: policy } }
-    });
-}
-
-async function updateVariantPricing(variantGid, price, compareAtPrice, cost) {
-    // --- THIS IS THE FIX ---
-    const mutation = `
-    mutation productVariantUpdate($input: ProductVariantInput!) {
-        productVariantUpdate(input: $input) {
-            productVariant { id, price, compareAtPrice }
-            userErrors { field, message }
-        }
-    }`;
-    const client = new shopify.clients.Graphql({ session: getSession() });
-    await client.request(mutation, {
-        variables: {
-            input: {
-                id: variantGid,
-                price: price,
-                compareAtPrice: compareAtPrice,
-                inventoryItem: { cost: cost }
+    const client = new shopify.clients.Rest({ session: getSession() });
+    // The REST API uses the numeric ID, not the full GID.
+    const numericVariantId = variantGid.split('/').pop();
+    
+    await client.put({
+        path: `variants/${numericVariantId}`,
+        data: {
+            variant: {
+                id: numericVariantId,
+                inventory_policy: policy.toLowerCase() // REST uses lowercase 'deny'/'continue'
             }
         }
     });
 }
+
+async function updateVariantPricing(variantGid, price, compareAtPrice, cost) {
+    const client = new shopify.clients.Rest({ session: getSession() });
+    const numericVariantId = variantGid.split('/').pop();
+
+    await client.put({
+        path: `variants/${numericVariantId}`,
+        data: {
+            variant: {
+                id: numericVariantId,
+                price: price,
+                compare_at_price: compareAtPrice,
+                inventory_item: {
+                    cost: cost
+                }
+            }
+        }
+    });
+}
+// --- END NEW METHOD ---
 
 function getSession() {
     return {
