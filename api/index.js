@@ -16,7 +16,6 @@ const shopify = shopifyApi.shopifyApi({
   apiKey: 'temp_key', apiSecretKey: 'temp_secret',
   scopes: ['read_products', 'write_products', 'write_inventory'],
   hostName: SHOPIFY_STORE_DOMAIN.replace('https://', ''),
-  // --- FIX: Lock to a stable API version ---
   apiVersion: '2024-04',
   isEmbeddedApp: false, isCustomStoreApp: true,
   adminApiAccessToken: SHOPIFY_ADMIN_API_TOKEN,
@@ -158,7 +157,6 @@ async function getBtiLinkedShopifyVariants() {
 
 async function updateVariantInventoryPolicy(variantGid, policy) {
     // --- THIS IS THE FIX ---
-    // The mutation name and the field inside it are both 'productVariantUpdate'.
     const mutation = `
     mutation productVariantUpdate($input: ProductVariantInput!) {
         productVariantUpdate(input: $input) {
