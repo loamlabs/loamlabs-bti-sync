@@ -146,9 +146,10 @@ async function getBtiLinkedShopifyVariants() {
     let hasNextPage = true; let cursor = null;
     do {
         // --- THIS IS THE FIX ---
-        // The entire GraphQL query string and variables are passed inside a 'data' object.
-        const response = await client.request({
-            data: { query: query, variables: { cursor } }
+        // The query string is the FIRST argument.
+        // The variables object is the SECOND argument.
+        const response = await client.request(query, {
+            variables: { cursor }
         });
         if (!response.data.productVariants) { break; }
         const pageData = response.data.productVariants;
@@ -169,11 +170,8 @@ async function updateVariantInventoryPolicy(variantGid, policy) {
     }`;
     const client = new shopify.clients.Graphql({ session: getSession() });
     // --- THIS IS THE FIX ---
-    await client.request({
-        data: {
-            query: mutation,
-            variables: { input: { id: variantGid, inventoryPolicy: policy } }
-        }
+    await client.request(mutation, {
+        variables: { input: { id: variantGid, inventoryPolicy: policy } }
     });
 }
 
@@ -187,16 +185,13 @@ async function updateVariantPricing(variantGid, price, compareAtPrice, cost) {
     }`;
     const client = new shopify.clients.Graphql({ session: getSession() });
     // --- THIS IS THE FIX ---
-    await client.request({
-        data: {
-            query: mutation,
-            variables: {
-                input: {
-                    id: variantGid,
-                    price: price,
-                    compareAtPrice: compareAtPrice,
-                    inventoryItem: { cost: cost }
-                }
+    await client.request(mutation, {
+        variables: {
+            input: {
+                id: variantGid,
+                price: price,
+                compareAtPrice: compareAtPrice,
+                inventoryItem: { cost: cost }
             }
         }
     });
