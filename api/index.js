@@ -16,7 +16,8 @@ const shopify = shopifyApi.shopifyApi({
   apiKey: 'temp_key', apiSecretKey: 'temp_secret',
   scopes: ['read_products', 'write_products', 'write_inventory'],
   hostName: SHOPIFY_STORE_DOMAIN.replace('https://', ''),
-  apiVersion: shopifyApi.LATEST_API_VERSION,
+  // --- FIX: Lock to a stable API version ---
+  apiVersion: '2024-04',
   isEmbeddedApp: false, isCustomStoreApp: true,
   adminApiAccessToken: SHOPIFY_ADMIN_API_TOKEN,
 });
@@ -145,12 +146,7 @@ async function getBtiLinkedShopifyVariants() {
     let allVariants = [];
     let hasNextPage = true; let cursor = null;
     do {
-        // --- THIS IS THE FIX ---
-        // The query string is the FIRST argument.
-        // The variables object is the SECOND argument.
-        const response = await client.request(query, {
-            variables: { cursor }
-        });
+        const response = await client.request(query, { variables: { cursor } });
         if (!response.data.productVariants) { break; }
         const pageData = response.data.productVariants;
         allVariants.push(...pageData.edges.map(edge => edge.node));
@@ -161,30 +157,31 @@ async function getBtiLinkedShopifyVariants() {
 }
 
 async function updateVariantInventoryPolicy(variantGid, policy) {
+    // --- THIS IS THE FIX ---
+    // The mutation name and the field inside it are both 'productVariantUpdate'.
     const mutation = `
-    mutation productVariantUpdate($input: ProductVariantInput!) {
+    mutation variantUpdate($input: ProductVariantInput!) {
         productVariantUpdate(input: $input) {
             productVariant { id, inventoryPolicy }
             userErrors { field, message }
         }
     }`;
     const client = new shopify.clients.Graphql({ session: getSession() });
-    // --- THIS IS THE FIX ---
     await client.request(mutation, {
         variables: { input: { id: variantGid, inventoryPolicy: policy } }
     });
 }
 
 async function updateVariantPricing(variantGid, price, compareAtPrice, cost) {
+    // --- THIS IS THE FIX ---
     const mutation = `
-    mutation productVariantUpdate($input: ProductVariantInput!) {
+    mutation variantUpdate($input: ProductVariantInput!) {
         productVariantUpdate(input: $input) {
             productVariant { id, price, compareAtPrice }
             userErrors { field, message }
         }
     }`;
     const client = new shopify.clients.Graphql({ session: getSession() });
-    // --- THIS IS THE FIX ---
     await client.request(mutation, {
         variables: {
             input: {
