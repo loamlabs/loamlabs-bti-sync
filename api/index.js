@@ -142,7 +142,7 @@ module.exports = async (req, res) => {
 
 // --- SHOPIFY API HELPER FUNCTIONS ---
 
-// *** FIX #1: THIS IS THE NEW, EFFICIENT QUERY ***
+// *** #1: THIS IS THE NEW, EFFICIENT QUERY ***
 async function getBtiLinkedShopifyVariants() {
     const query = `
     query($cursor: String, $query: String!) {
@@ -162,7 +162,6 @@ async function getBtiLinkedShopifyVariants() {
         pageInfo { hasNextPage, endCursor }
       }
     }`;
-    // *** This now uses the modern .request method ***
     const client = new shopify.clients.Graphql({ session: getSession() });
     let allVariants = [];
     let hasNextPage = true; let cursor = null;
@@ -172,8 +171,9 @@ async function getBtiLinkedShopifyVariants() {
                 query, 
                 variables: { 
                     cursor,
-                    // The magic is here: we tell Shopify to pre-filter for us
-                    query: "metafield:custom.bti_part_number:''" 
+                    // --- THIS IS THE FIX ---
+                    // The query now correctly searches for the MERE EXISTENCE of the metafield.
+                    query: "metafield:custom.bti_part_number" 
                 } 
             } 
         });
@@ -183,7 +183,6 @@ async function getBtiLinkedShopifyVariants() {
         hasNextPage = pageData.pageInfo.hasNextPage;
         cursor = pageData.pageInfo.endCursor;
     } while (hasNextPage);
-    // The final .filter() is no longer needed as Shopify does the work
     return allVariants;
 }
 
