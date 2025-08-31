@@ -80,10 +80,17 @@ module.exports = async (req, res) => {
                     newCompareAtPrice = btiData.msrp.toFixed(2);
                 }
                 const newCost = btiData.cost.toFixed(2);
-                // --- THIS IS THE FIX ---
                 const currentCost = variant.inventoryItem.unitCost ? parseFloat(variant.inventoryItem.unitCost.amount).toFixed(2) : null;
 
                 if (newPrice !== variant.price || newCompareAtPrice !== variant.compareAtPrice || newCost !== currentCost) {
+                    
+                    // --- NEW DEBUGGING LOGS ---
+                    console.log(`\n--- DEBUG for: ${variantIdentifier} ---`);
+                    console.log(`Price compare: (Shopify: ${variant.price}, Type: ${typeof variant.price}) vs (BTI: ${newPrice}, Type: ${typeof newPrice}) -> Different? ${newPrice !== variant.price}`);
+                    console.log(`CompareAt compare: (Shopify: ${variant.compareAtPrice}, Type: ${typeof variant.compareAtPrice}) vs (BTI: ${newCompareAtPrice}, Type: ${typeof newCompareAtPrice}) -> Different? ${newCompareAtPrice !== variant.compareAtPrice}`);
+                    console.log(`Cost compare: (Shopify: ${currentCost}, Type: ${typeof currentCost}) vs (BTI: ${newCost}, Type: ${typeof newCost}) -> Different? ${newCost !== currentCost}`);
+                    // --- END DEBUGGING LOGS ---
+
                     updatePromises.push(updateVariantPricing(variant.id, newPrice, newCompareAtPrice, newCost));
                     changesMade.pricing.push({ 
                         name: variantIdentifier, 
@@ -202,7 +209,6 @@ async function updateVariantPricing(variantGid, price, compareAtPrice, cost) {
                 id: numericVariantId,
                 price: price,
                 compare_at_price: compareAtPrice,
-                // --- REST API uses a different field name for cost ---
                 inventory_item: {
                     cost: cost
                 }
