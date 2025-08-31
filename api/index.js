@@ -80,11 +80,11 @@ module.exports = async (req, res) => {
                     newCompareAtPrice = btiData.msrp.toFixed(2);
                 }
                 const newCost = btiData.cost.toFixed(2);
-                const currentCost = variant.inventoryItem.unitCost?.amount;
+                // --- THIS IS THE FIX ---
+                const currentCost = variant.inventoryItem.unitCost ? parseFloat(variant.inventoryItem.unitCost.amount).toFixed(2) : null;
 
                 if (newPrice !== variant.price || newCompareAtPrice !== variant.compareAtPrice || newCost !== currentCost) {
                     updatePromises.push(updateVariantPricing(variant.id, newPrice, newCompareAtPrice, newCost));
-                    // --- ENHANCEMENT: Store all relevant old and new values for a better report ---
                     changesMade.pricing.push({ 
                         name: variantIdentifier, 
                         oldPrice: variant.price, newPrice: newPrice, 
@@ -102,22 +102,16 @@ module.exports = async (req, res) => {
         const totalChanges = changesMade.availability.length + changesMade.pricing.length;
         if (totalChanges > 0) {
             let reportHtml = `<h1>BTI Inventory & Price Sync Report</h1>`;
-            if (changesMade.availability.length > 0) {
-                reportHtml += `<h2>Availability Updates (${changesMade.availability.length})</h2><ul>${changesMade.availability.map(c => `<li><b>${c.name}</b>: ${c.action}</li>`).join('')}</ul>`;
-            }
+            if (changesMade.availability.length > 0) { reportHtml += `<h2>Availability Updates (${changesMade.availability.length})</h2><ul>${changesMade.availability.map(c => `<li><b>${c.name}</b>: ${c.action}</li>`).join('')}</ul>`; }
             if (changesMade.pricing.length > 0) {
-                // --- ENHANCEMENT: The email now generates a much more detailed table ---
                 reportHtml += `<h2>Pricing Updates (${changesMade.pricing.length})</h2>
                                <table style="width:100%; border-collapse: collapse;">
-                                 <thead>
-                                   <tr style="text-align:left; background-color:#f4f4f4;">
+                                 <thead><tr style="text-align:left; background-color:#f4f4f4;">
                                      <th style="padding:8px; border:1px solid #ddd;">Product</th>
                                      <th style="padding:8px; border:1px solid #ddd;">Price</th>
                                      <th style="padding:8px; border:1px solid #ddd;">Compare At</th>
                                      <th style="padding:8px; border:1px solid #ddd;">Cost</th>
-                                   </tr>
-                                 </thead>
-                                 <tbody>`;
+                                 </tr></thead><tbody>`;
                 changesMade.pricing.forEach(c => {
                     const priceChanged = c.oldPrice !== c.newPrice ? 'style="background-color:#fff8e1;"' : '';
                     const compareAtChanged = c.oldCompareAt !== c.newCompareAt ? 'style="background-color:#fff8e1;"' : '';
@@ -208,7 +202,10 @@ async function updateVariantPricing(variantGid, price, compareAtPrice, cost) {
                 id: numericVariantId,
                 price: price,
                 compare_at_price: compareAtPrice,
-                inventory_item: { cost: cost }
+                // --- REST API uses a different field name for cost ---
+                inventory_item: {
+                    cost: cost
+                }
             }
         }
     });
