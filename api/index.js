@@ -81,17 +81,10 @@ module.exports = async (req, res) => {
                 }
                 const newCost = btiData.cost.toFixed(2);
                 const currentCost = variant.inventoryItem.unitCost ? parseFloat(variant.inventoryItem.unitCost.amount).toFixed(2) : null;
-
+                
                 if (newPrice !== variant.price || newCompareAtPrice !== variant.compareAtPrice || newCost !== currentCost) {
-                    
-                    // --- NEW DEBUGGING LOGS ---
-                    console.log(`\n--- DEBUG for: ${variantIdentifier} ---`);
-                    console.log(`Price compare: (Shopify: ${variant.price}, Type: ${typeof variant.price}) vs (BTI: ${newPrice}, Type: ${typeof newPrice}) -> Different? ${newPrice !== variant.price}`);
-                    console.log(`CompareAt compare: (Shopify: ${variant.compareAtPrice}, Type: ${typeof variant.compareAtPrice}) vs (BTI: ${newCompareAtPrice}, Type: ${typeof newCompareAtPrice}) -> Different? ${newCompareAtPrice !== variant.compareAtPrice}`);
-                    console.log(`Cost compare: (Shopify: ${currentCost}, Type: ${typeof currentCost}) vs (BTI: ${newCost}, Type: ${typeof newCost}) -> Different? ${newCost !== currentCost}`);
-                    // --- END DEBUGGING LOGS ---
-
-                    updatePromises.push(updateVariantPricing(variant.id, newPrice, newCompareAtPrice, newCost));
+                    // We must pass the inventoryItem.id to the pricing update function
+                    updatePromises.push(updateVariantPricing(variant.id, newPrice, newCompareAtPrice, newCost, variant.inventoryItem.id));
                     changesMade.pricing.push({ 
                         name: variantIdentifier, 
                         oldPrice: variant.price, newPrice: newPrice, 
@@ -199,22 +192,36 @@ async function updateVariantInventoryPolicy(variantGid, policy) {
     });
 }
 
-async function updateVariantPricing(variantGid, price, compareAtPrice, cost) {
+// --- THIS IS THE FINAL, CORRECTED FUNCTION ---
+async function updateVariantPricing(variantGid, price, compareAtPrice, cost, inventoryItemId) {
     const client = new shopify.clients.Rest({ session: getSession() });
     const numericVariantId = variantGid.split('/').pop();
+
+    // API Call 1: Update price and compare_at_price on the variant
     await client.put({
         path: `variants/${numericVariantId}`,
         data: {
             variant: {
                 id: numericVariantId,
                 price: price,
-                compare_at_price: compareAtPrice,
-                inventory_item: {
-                    cost: cost
-                }
+                compare_at_price: compareAtPrice
             }
         }
     });
+
+    // API Call 2: Update cost on the separate inventory_item endpoint
+    if (cost && inventoryItemId) {
+        const numericInventoryItemId = inventoryItemId.split('/').pop();
+        await client.put({
+            path: `inventory_items/${numericInventoryItemId}`,
+            data: {
+                inventory_item: {
+                    id: numericInventoryItemId,
+                    cost: cost
+                }
+            }
+        });
+    }
 }
 
 function getSession() {
