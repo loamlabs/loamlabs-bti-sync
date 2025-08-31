@@ -187,7 +187,7 @@ async function updateVariantInventoryPolicy(variantGid, policy) {
     const client = new shopify.clients.Rest({ session: getSession() });
     const numericVariantId = variantGid.split('/').pop();
     await client.put({
-        path: `variants/${numericVariantId}`,
+        path: `variants/${numericVariantId}.json`,
         data: { variant: { id: numericVariantId, inventory_policy: policy.toLowerCase() } }
     });
 }
@@ -196,10 +196,11 @@ async function updateVariantInventoryPolicy(variantGid, policy) {
 async function updateVariantPricing(variantGid, price, compareAtPrice, cost, inventoryItemId) {
     const client = new shopify.clients.Rest({ session: getSession() });
     const numericVariantId = variantGid.split('/').pop();
+    const numericInventoryItemId = inventoryItemId ? inventoryItemId.split('/').pop() : null;
 
     // API Call 1: Update price and compare_at_price on the variant
     await client.put({
-        path: `variants/${numericVariantId}`,
+        path: `variants/${numericVariantId}.json`,
         data: {
             variant: {
                 id: numericVariantId,
@@ -210,10 +211,9 @@ async function updateVariantPricing(variantGid, price, compareAtPrice, cost, inv
     });
 
     // API Call 2: Update cost on the separate inventory_item endpoint
-    if (cost && inventoryItemId) {
-        const numericInventoryItemId = inventoryItemId.split('/').pop();
+    if (cost && numericInventoryItemId) {
         await client.put({
-            path: `inventory_items/${numericInventoryItemId}`,
+            path: `inventory_items/${numericInventoryItemId}.json`,
             data: {
                 inventory_item: {
                     id: numericInventoryItemId,
