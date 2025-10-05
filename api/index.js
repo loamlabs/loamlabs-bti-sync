@@ -1,5 +1,30 @@
+// Import the necessary tools (libraries)
+const shopifyApi = require('@shopify/shopify-api');
+require('@shopify/shopify-api/adapters/node');
+const { Resend } = require('resend');
+const { parse } = require('csv-parse/sync');
+const util = require('util'); // <-- THIS LINE FIXES THE ERROR
+
 // A simple helper function to pause execution
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// --- CONFIGURATION ---
+const {
+  SHOPIFY_STORE_DOMAIN, SHOPIFY_ADMIN_API_TOKEN, BTI_USERNAME,
+  BTI_PASSWORD, RESEND_API_KEY, REPORT_EMAIL_TO,
+} = process.env;
+
+// Initialize clients
+const shopify = shopifyApi.shopifyApi({
+  apiKey: 'temp_key', apiSecretKey: 'temp_secret',
+  scopes: ['read_products', 'write_products', 'write_inventory'],
+  hostName: SHOPIFY_STORE_DOMAIN.replace('https://', ''),
+  apiVersion: '2024-04',
+  isEmbeddedApp: false, isCustomStoreApp: true,
+  adminApiAccessToken: SHOPIFY_ADMIN_API_TOKEN,
+});
+const resend = new Resend(RESEND_API_KEY);
+const BTI_FULL_DATA_URL = 'https://www.bti-usa.com/inventory?full=true';
 
 // The main sync function
 module.exports = async (req, res) => {
@@ -138,3 +163,89 @@ module.exports = async (req, res) => {
     console.log(log.join('\n'));
     res.status(status).send(message);
 };
+
+// --- SHOPIFY API HELPER FUNCTIONS ---
+
+async function getBtiLinkedShopifyVariants() {
+    const query = `
+    query($cursor: String) {
+      productVariants(first: 250, after: $cursor) {
+        edges {
+          node {
+            id, title, price, compareAtPrice, inventoryQuantity, inventoryPolicy
+            inventoryItem { id, unitCost { amount } }
+            btiPartNumber: metafield(namespace: "custom", key: "bti_part_number") { value }
+            product {
+              id, title
+              outOfStockAction: metafield(namespace: "custom", key: "out_of_stock_action") { value }
+              priceAdjustmentPercentage: metafield(namespace: "custom", key: "price_adjustment_percentage") { value }
+            }
+          }
+        }
+        pageInfo { hasNextPage, endCursor }
+      }
+    }`;
+    const client = new shopify.clients.Graphql({ session: getSession() });
+    let allVariants = [];
+    let hasNextPage = true; let cursor = null;
+    do {
+        const response = await client.request(query, { variables: { cursor } });
+        if (response.data && !response.data.productVariants) { break; }
+        const pageData = response.data.productVariants;
+        allVariants.push(...pageData.edges.map(edge => edge.node));
+        hasNextPage = pageData.pageInfo.hasNextPage;
+        cursor = pageData.pageInfo.endCursor;
+    } while (hasNextPage);
+    return allVariants.filter(variant => variant.btiPartNumber && variant.btiPartNumber.value);
+}
+
+async function updateVariantInventoryPolicy(variantGid, policy) {
+    const client = new shopify.clients.Rest({ session: getSession() });
+    const numericVariantId = variantGid.split('/').pop();
+    await client.put({
+        path: `variants/${numericVariantId}.json`,
+        data: { variant: { id: numericVariantId, inventory_policy: policy.toLowerCase() } }
+    });
+}
+
+// --- THIS IS THE FINAL, CORRECTED FUNCTION ---
+async function updateVariantPricing(variantGid, price, compareAtPrice, cost, inventoryItemId) {
+    const client = new shopify.clients.Rest({ session: getSession() });
+    const numericVariantId = variantGid.split('/').pop();
+    const numericInventoryItemId = inventoryItemId ? inventoryItemId.split('/').pop() : null;
+
+    // API Call 1: Update price and compare_at_price on the variant
+    await client.put({
+        path: `variants/${numericVariantId}.json`,
+        data: {
+            variant: {
+                id: numericVariantId,
+                price: price,
+                compare_at_price: compareAtPrice
+            }
+        }
+    });
+
+    // API Call 2: Update cost on the separate inventory_item endpoint
+    if (cost && numericInventoryItemId) {
+        await client.put({
+            path: `inventory_items/${numericInventoryItemId}.json`,
+            data: {
+                inventory_item: {
+                    id: numericInventoryItemId,
+                    cost: cost
+                }
+            }
+        });
+    }
+}
+
+function getSession() {
+    return {
+        id: 'bti-sync-session',
+        shop: SHOPIFY_STORE_DOMAIN,
+        accessToken: SHOPIFY_ADMIN_API_TOKEN,
+        state: 'not-used',
+        isOnline: false, 
+    };
+}
