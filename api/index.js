@@ -4,27 +4,10 @@ require('@shopify/shopify-api/adapters/node');
 const { Resend } = require('resend');
 const { parse } = require('csv-parse/sync');
 const util = require('util');
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // --- CONFIGURATION ---
-const {
-  SHOPIFY_STORE_DOMAIN, SHOPIFY_ADMIN_API_TOKEN, BTI_USERNAME,
-  BTI_PASSWORD, RESEND_API_KEY, REPORT_EMAIL_TO,
-} = process.env;
-
-// Initialize clients
-const shopify = shopifyApi.shopifyApi({
-  apiKey: 'temp_key', apiSecretKey: 'temp_secret',
-  scopes: ['read_products', 'write_products', 'write_inventory'],
-  hostName: SHOPIFY_STORE_DOMAIN.replace('https://', ''),
-  apiVersion: '2024-04',
-  isEmbeddedApp: false, isCustomStoreApp: true,
-  adminApiAccessToken: SHOPIFY_ADMIN_API_TOKEN,
-});
-const resend = new Resend(RESEND_API_KEY);
-const BTI_FULL_DATA_URL = 'https://www.bti-usa.com/inventory?full=true';
-
-// The main sync function
-module.exports = async (req, res) => {
+const {module.exports = async (req, res) => {
     console.log("BTI full sync (inventory & price) function triggered...");
     const log = ["BTI Sync Started..."];
     let status = 200;
@@ -49,25 +32,34 @@ module.exports = async (req, res) => {
         const shopifyVariants = await getBtiLinkedShopifyVariants();
         log.push(`Found ${shopifyVariants.length} Shopify variants to process.`);
 
-        const updatePromises = [];
+        let updatesPerformedCount = 0;
+        log.push("Processing variants sequentially to respect API rate limits...");
 
         for (const variant of shopifyVariants) {
             const btiPartNumber = variant.btiPartNumber.value;
             const btiData = btiDataMap.get(btiPartNumber);
             if (!btiData) continue;
+            
             const variantIdentifier = `${variant.product.title} - ${variant.title}`;
+            let hasUpdateOccurred = false;
+
+            // --- AVAILABILITY LOGIC ---
             const shopifyStock = variant.inventoryQuantity;
             const isTrulyOutOfStock = shopifyStock <= 0 && btiData.available <= 0;
             const isCurrentlySetToContinueSelling = variant.inventoryPolicy === 'CONTINUE';
             if (variant.product.outOfStockAction?.value === 'Make Unavailable (Track Inventory)' || !variant.product.outOfStockAction?.value) {
                 if (isTrulyOutOfStock && isCurrentlySetToContinueSelling) {
-                    updatePromises.push(updateVariantInventoryPolicy(variant.id, 'DENY'));
+                    await updateVariantInventoryPolicy(variant.id, 'DENY');
                     changesMade.availability.push({ name: variantIdentifier, action: 'Made Unavailable' });
+                    hasUpdateOccurred = true;
                 } else if (!isTrulyOutOfStock && !isCurrentlySetToContinueSelling) {
-                    updatePromises.push(updateVariantInventoryPolicy(variant.id, 'CONTINUE'));
+                    await updateVariantInventoryPolicy(variant.id, 'CONTINUE');
                     changesMade.availability.push({ name: variantIdentifier, action: 'Made Available' });
+                    hasUpdateOccurred = true;
                 }
             }
+
+            // --- PRICING LOGIC ---
             if (btiData.msrp > 0 && btiData.cost > 0) {
                 let newPrice; let newCompareAtPrice;
                 const priceAdjustmentPct = variant.product.priceAdjustmentPercentage?.value;
@@ -83,21 +75,25 @@ module.exports = async (req, res) => {
                 const currentCost = variant.inventoryItem.unitCost ? parseFloat(variant.inventoryItem.unitCost.amount).toFixed(2) : null;
                 
                 if (newPrice !== variant.price || newCompareAtPrice !== variant.compareAtPrice || newCost !== currentCost) {
-                    // We must pass the inventoryItem.id to the pricing update function
-                    updatePromises.push(updateVariantPricing(variant.id, newPrice, newCompareAtPrice, newCost, variant.inventoryItem.id));
+                    await updateVariantPricing(variant.id, newPrice, newCompareAtPrice, newCost, variant.inventoryItem.id);
                     changesMade.pricing.push({ 
                         name: variantIdentifier, 
                         oldPrice: variant.price, newPrice: newPrice, 
                         oldCompareAt: variant.compareAtPrice, newCompareAt: newCompareAtPrice,
                         oldCost: currentCost, newCost: newCost 
                     });
+                    hasUpdateOccurred = true;
                 }
+            }
+
+            // If an API call was made for this variant, PAUSE to respect the rate limit.
+            if (hasUpdateOccurred) {
+                updatesPerformedCount++;
+                await sleep(550); // Pause for 550 milliseconds
             }
         }
         
-        log.push(`Found ${updatePromises.length} total API updates to perform. Executing in parallel...`);
-        await Promise.all(updatePromises);
-        log.push("All API updates completed.");
+        log.push(`All variants processed. ${updatesPerformedCount} updates were performed sequentially.`);
 
         const totalChanges = changesMade.availability.length + changesMade.pricing.length;
         if (totalChanges > 0) {
