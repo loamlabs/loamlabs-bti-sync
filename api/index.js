@@ -3,7 +3,7 @@ const shopifyApi = require('@shopify/shopify-api');
 require('@shopify/shopify-api/adapters/node');
 const { Resend } = require('resend');
 const { parse } = require('csv-parse/sync');
-const util = require('util'); // <-- THIS LINE FIXES THE ERROR
+const util = require('util');
 
 // A simple helper function to pause execution
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -14,17 +14,41 @@ const {
   BTI_PASSWORD, RESEND_API_KEY, REPORT_EMAIL_TO,
 } = process.env;
 
-// Initialize clients
+// Initialize clients (Keep as is)
 const shopify = shopifyApi.shopifyApi({
   apiKey: 'temp_key', apiSecretKey: 'temp_secret',
   scopes: ['read_products', 'write_products', 'write_inventory'],
-  hostName: SHOPIFY_STORE_DOMAIN.replace('https://', ''),
+  hostName: SHOPIFY_STORE_DOMAIN ? SHOPIFY_STORE_DOMAIN.replace('https://', '') : '', // Added safety check
   apiVersion: '2024-04',
   isEmbeddedApp: false, isCustomStoreApp: true,
   adminApiAccessToken: SHOPIFY_ADMIN_API_TOKEN,
 });
 const resend = new Resend(RESEND_API_KEY);
 const BTI_FULL_DATA_URL = 'https://www.bti-usa.com/inventory?full=true';
+
+// --- NEW HELPER: RETRY FETCH LOGIC ---
+async function fetchWithRetry(url, options, retries = 3) {
+    for (let i = 0; i < retries; i++) {
+        try {
+            const response = await fetch(url, options);
+            if (response.ok) return response;
+            
+            // If 503, wait and retry
+            if (response.status === 503 || response.status === 502 || response.status === 504) {
+                console.log(`Attempt ${i + 1} failed with ${response.status}. Retrying in 2 seconds...`);
+                await sleep(2000 * (i + 1)); // Wait 2s, then 4s, etc.
+                continue;
+            }
+            
+            // If it's a 401 (Auth) or 404, throw immediately, don't retry
+            throw new Error(`Request failed: ${response.status}`);
+        } catch (err) {
+            if (i === retries - 1) throw err; // Throw on last attempt
+            console.log(`Connection error on attempt ${i + 1}: ${err.message}. Retrying...`);
+            await sleep(2000);
+        }
+    }
+}
 
 // The main sync function
 module.exports = async (req, res) => {
@@ -36,10 +60,24 @@ module.exports = async (req, res) => {
 
     try {
         log.push("Fetching FULL inventory and price data from BTI...");
+        
+        // --- FIX IMPLEMENTED HERE ---
         const btiCredentials = Buffer.from(`${BTI_USERNAME}:${BTI_PASSWORD}`).toString('base64');
-        const btiResponse = await fetch(BTI_FULL_DATA_URL, { headers: { 'Authorization': `Basic ${btiCredentials}` } });
-        if (!btiResponse.ok) throw new Error(`BTI connection failed: ${btiResponse.status}`);
+        
+        // We use the custom fetchWithRetry function
+        // We add User-Agent to pretend we are a browser, not a bot
+        const btiResponse = await fetchWithRetry(BTI_FULL_DATA_URL, { 
+            headers: { 
+                'Authorization': `Basic ${btiCredentials}`,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/csv,text/plain;q=0.9,*/*;q=0.8',
+                'Connection': 'keep-alive'
+            } 
+        });
+
         const csvText = await btiResponse.text();
+        // ---------------------------
+
         const records = parse(csvText, { columns: true, skip_empty_lines: true });
         const btiDataMap = new Map(records.map(r => [r.id, {
             available: parseInt(r.available, 10) || 0,
@@ -67,7 +105,11 @@ module.exports = async (req, res) => {
             const shopifyStock = variant.inventoryQuantity;
             const isTrulyOutOfStock = shopifyStock <= 0 && btiData.available <= 0;
             const isCurrentlySetToContinueSelling = variant.inventoryPolicy === 'CONTINUE';
-            if (variant.product.outOfStockAction?.value === 'Make Unavailable (Track Inventory)' || !variant.product.outOfStockAction?.value) {
+            
+            // Fixed logic check for outOfStockAction
+            const outOfStockAction = variant.product.outOfStockAction?.value;
+            
+            if (outOfStockAction === 'Make Unavailable (Track Inventory)' || !outOfStockAction) {
                 if (isTrulyOutOfStock && isCurrentlySetToContinueSelling) {
                     await updateVariantInventoryPolicy(variant.id, 'DENY');
                     changesMade.availability.push({ name: variantIdentifier, action: 'Made Unavailable' });
