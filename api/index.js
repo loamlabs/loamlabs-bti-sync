@@ -14,11 +14,11 @@ const {
   BTI_PASSWORD, RESEND_API_KEY, REPORT_EMAIL_TO,
 } = process.env;
 
-// Initialize clients (Keep as is)
+// Initialize clients
 const shopify = shopifyApi.shopifyApi({
   apiKey: 'temp_key', apiSecretKey: 'temp_secret',
   scopes: ['read_products', 'write_products', 'write_inventory'],
-  hostName: SHOPIFY_STORE_DOMAIN ? SHOPIFY_STORE_DOMAIN.replace('https://', '') : '', // Added safety check
+  hostName: SHOPIFY_STORE_DOMAIN ? SHOPIFY_STORE_DOMAIN.replace('https://', '') : '',
   apiVersion: '2024-04',
   isEmbeddedApp: false, isCustomStoreApp: true,
   adminApiAccessToken: SHOPIFY_ADMIN_API_TOKEN,
@@ -26,28 +26,34 @@ const shopify = shopifyApi.shopifyApi({
 const resend = new Resend(RESEND_API_KEY);
 const BTI_FULL_DATA_URL = 'https://www.bti-usa.com/inventory?full=true';
 
-// --- NEW HELPER: RETRY FETCH LOGIC ---
+// --- IMPROVED RETRY LOGIC ---
 async function fetchWithRetry(url, options, retries = 3) {
+    let lastError;
     for (let i = 0; i < retries; i++) {
         try {
             const response = await fetch(url, options);
             if (response.ok) return response;
             
-            // If 503, wait and retry
-            if (response.status === 503 || response.status === 502 || response.status === 504) {
-                console.log(`Attempt ${i + 1} failed with ${response.status}. Retrying in 2 seconds...`);
-                await sleep(2000 * (i + 1)); // Wait 2s, then 4s, etc.
+            lastError = new Error(`Request failed with status: ${response.status} (${response.statusText})`);
+            
+            // If 503 (Service Unavailable) or 429 (Too Many Requests), wait and retry
+            if (response.status === 503 || response.status === 502 || response.status === 504 || response.status === 429) {
+                console.log(`Attempt ${i + 1} failed with ${response.status}. Retrying in 5 seconds...`);
+                await sleep(5000); // Wait 5 seconds
                 continue;
             }
             
-            // If it's a 401 (Auth) or 404, throw immediately, don't retry
-            throw new Error(`Request failed: ${response.status}`);
+            // If it's a 401 (Auth) or 404, stop immediately
+            throw lastError;
         } catch (err) {
-            if (i === retries - 1) throw err; // Throw on last attempt
-            console.log(`Connection error on attempt ${i + 1}: ${err.message}. Retrying...`);
-            await sleep(2000);
+            lastError = err;
+            console.log(`Connection error on attempt ${i + 1}: ${err.message}`);
+            if (i === retries - 1) break; // Don't sleep on the last failure
+            await sleep(5000);
         }
     }
+    // If we exit the loop, we failed. Throw the last error.
+    throw lastError || new Error("Unknown error during BTI fetch");
 }
 
 // The main sync function
@@ -60,25 +66,30 @@ module.exports = async (req, res) => {
 
     try {
         log.push("Fetching FULL inventory and price data from BTI...");
-        
-        // --- FIX IMPLEMENTED HERE ---
         const btiCredentials = Buffer.from(`${BTI_USERNAME}:${BTI_PASSWORD}`).toString('base64');
         
-        // We use the custom fetchWithRetry function
-        // We add User-Agent to pretend we are a browser, not a bot
+        // --- UPDATED HEADERS TO MIMIC BROWSER ---
         const btiResponse = await fetchWithRetry(BTI_FULL_DATA_URL, { 
             headers: { 
                 'Authorization': `Basic ${btiCredentials}`,
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/csv,text/plain;q=0.9,*/*;q=0.8',
-                'Connection': 'keep-alive'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.bti-usa.com/login', // Triggers the server to think we came from login
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1'
             } 
         });
 
         const csvText = await btiResponse.text();
-        // ---------------------------
-
         const records = parse(csvText, { columns: true, skip_empty_lines: true });
+        
+        // Validation check: ensure we actually got CSV data and not an HTML error page
+        if (records.length === 0 && csvText.includes('<html')) {
+             throw new Error("BTI returned an HTML page instead of CSV. Check credentials or firewall.");
+        }
+
         const btiDataMap = new Map(records.map(r => [r.id, {
             available: parseInt(r.available, 10) || 0,
             cost: parseFloat(r.your_price) || 0,
@@ -106,7 +117,6 @@ module.exports = async (req, res) => {
             const isTrulyOutOfStock = shopifyStock <= 0 && btiData.available <= 0;
             const isCurrentlySetToContinueSelling = variant.inventoryPolicy === 'CONTINUE';
             
-            // Fixed logic check for outOfStockAction
             const outOfStockAction = variant.product.outOfStockAction?.value;
             
             if (outOfStockAction === 'Make Unavailable (Track Inventory)' || !outOfStockAction) {
@@ -148,10 +158,9 @@ module.exports = async (req, res) => {
                 }
             }
 
-            // If an API call was made for this variant, PAUSE to respect the rate limit.
             if (hasUpdateOccurred) {
                 updatesPerformedCount++;
-                await sleep(550); // Pause for 550 milliseconds
+                await sleep(550); 
             }
         }
         
@@ -250,7 +259,6 @@ async function updateVariantInventoryPolicy(variantGid, policy) {
     });
 }
 
-// --- THIS IS THE FINAL, CORRECTED FUNCTION ---
 async function updateVariantPricing(variantGid, price, compareAtPrice, cost, inventoryItemId) {
     const client = new shopify.clients.Rest({ session: getSession() });
     const numericVariantId = variantGid.split('/').pop();
