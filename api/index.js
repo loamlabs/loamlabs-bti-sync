@@ -79,18 +79,37 @@ module.exports = async (req, res) => {
                 }
             }
 
-            // --- PRICING LOGIC ---
+           // --- PRICING LOGIC ---
             if (btiData.msrp > 0 && btiData.cost > 0) {
-                let newPrice; let newCompareAtPrice;
+                let newPrice; 
+                let newCompareAtPrice;
+                
+                // 1. Calculate the Target Sale Price
                 const priceAdjustmentPct = variant.product.priceAdjustmentPercentage?.value;
                 if (priceAdjustmentPct != null) {
                     const adjustment = 1 + (parseInt(priceAdjustmentPct, 10) / 100);
                     newPrice = (btiData.msrp * adjustment).toFixed(2);
-                    newCompareAtPrice = newPrice;
                 } else {
+                    // Default: 1% off MSRP if no custom percentage is provided
                     newPrice = (btiData.msrp * 0.99).toFixed(2);
-                    newCompareAtPrice = btiData.msrp.toFixed(2);
                 }
+
+                // 2. Preserve the "Sale Badge" Gap
+                const currentPrice = parseFloat(variant.price);
+                const currentCompare = variant.compareAtPrice ? parseFloat(variant.compareAtPrice) : 0;
+
+                if (currentCompare > currentPrice) {
+                    // There is an active sale gap (e.g., your price is $5 lower than MSRP)
+                    const gap = currentCompare - currentPrice;
+                    // Apply that same gap to the new calculated price
+                    newCompareAtPrice = (parseFloat(newPrice) + gap).toFixed(2);
+                } else {
+                    // No sale was active. 
+                    // If no custom % is set, default to MSRP as the compare-at price
+                    // If a custom % IS set, keep prices equal (full price)
+                    newCompareAtPrice = (priceAdjustmentPct != null) ? newPrice : btiData.msrp.toFixed(2);
+                }
+
                 const newCost = btiData.cost.toFixed(2);
                 const currentCost = variant.inventoryItem.unitCost ? parseFloat(variant.inventoryItem.unitCost.amount).toFixed(2) : null;
                 
