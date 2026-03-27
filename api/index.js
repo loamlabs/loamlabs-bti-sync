@@ -54,7 +54,7 @@ module.exports = async (req, res) => {
 
         log.push("Fetching Watcher Managed Registry to check for pricing conflicts...");
         const { data: watcherRules } = await supabase.from('watcher_rules').select('shopify_variant_id').not('vendor_url', 'is', null);
-        const watcherManagedSet = new Set(watcherRules?.map(r => r.shopify_variant_id) || []);
+        const watcherManagedSet = new Set(watcherRules?.map(r => String(r.shopify_variant_id)) || []);
         log.push(`Found ${watcherManagedSet.size} items managed by Vendor Watcher (Price Authority).`);
 
         log.push("Fetching all Shopify variants with a BTI part number...");
@@ -74,6 +74,17 @@ module.exports = async (req, res) => {
             const isManagedByWatcher = watcherManagedSet.has(numericVariantId);
             let hasUpdateOccurred = false;
 
+            const btiMonitorActive = variant.btiMonitor?.value === 'true';
+            console.log(`[DEBUG] ${variantIdentifier} | Watcher: ${isManagedByWatcher} | Metafield: ${variant.btiMonitor?.value} | Calculated Active: ${btiMonitorActive}`);
+
+            // --- AUTHORITY CHECK ---
+            if (isManagedByWatcher && !btiMonitorActive) {
+                console.log(`[AUTH] Skipping ${variantIdentifier} - Authority yielded to Vendor Watcher.`);
+                continue; 
+            }
+
+            console.log(`[AUTH] Processing ${variantIdentifier} - Authority held by BTI (Watcher Managed: ${isManagedByWatcher}, BTI Monitor: ${btiMonitorActive})`);
+
             // --- AVAILABILITY LOGIC (Always Sync, OR Logic) ---
             const shopifyStock = variant.inventoryQuantity;
             const isTrulyOutOfStock = shopifyStock <= 0 && btiData.available <= 0;
@@ -90,16 +101,8 @@ module.exports = async (req, res) => {
                 }
             }
 
-            const btiMonitorActive = variant.btiMonitor?.value === 'true';
-
             // --- PRICING LOGIC ---
-            // 1. If BTI Monitor is explicitly ON (yielded by Watcher), BTI TAKES authority.
-            // 2. If BTI Monitor is OFF but item is in Watcher, BTI YIELDS authority.
-            // 3. Otherwise, BTI syncs as normal.
-            
-            if (isManagedByWatcher && !btiMonitorActive) {
-                // Yielding to Vendor Watcher (Master when in-stock)
-            } else if (btiData.msrp > 0 && btiData.cost > 0) {
+            if (btiData.msrp > 0 && btiData.cost > 0) {
                 let newPrice; 
                 let newCompareAtPrice;
                 
