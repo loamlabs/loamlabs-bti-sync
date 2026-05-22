@@ -237,6 +237,9 @@ async function getBtiLinkedShopifyVariants() {
         allVariants.push(...pageData.edges.map(edge => edge.node));
         hasNextPage = pageData.pageInfo.hasNextPage;
         cursor = pageData.pageInfo.endCursor;
+        if (hasNextPage) {
+            await sleep(1000); // Wait 1s to allow Shopify's GraphQL rate bucket to refill
+        }
     } while (hasNextPage);
     return allVariants.filter(variant => variant.btiPartNumber && variant.btiPartNumber.value);
 }
