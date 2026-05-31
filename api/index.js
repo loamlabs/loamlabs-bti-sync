@@ -41,8 +41,43 @@ module.exports = async (req, res) => {
     try {
         log.push("Fetching FULL inventory and price data from BTI...");
         const btiCredentials = Buffer.from(`${BTI_USERNAME}:${BTI_PASSWORD}`).toString('base64');
-        const btiResponse = await fetch(BTI_FULL_DATA_URL, { headers: { 'Authorization': `Basic ${btiCredentials}` } });
-        if (!btiResponse.ok) throw new Error(`BTI connection failed: ${btiResponse.status}`);
+        
+        let btiResponse;
+        let attempt = 0;
+        const maxRetries = 3;
+
+        // --- RETRY LOOP ---
+        while (attempt < maxRetries) {
+            if (attempt > 0) log.push(`Retrying BTI connection (Attempt ${attempt + 1}/${maxRetries})...`);
+            
+            btiResponse = await fetch(BTI_FULL_DATA_URL, { 
+                headers: { 
+                    'Authorization': `Basic ${btiCredentials}`,
+                    // Added headers to prevent anti-bot WAFs from blocking the request with a 503
+                    'User-Agent': 'LoamLabs-BTI-Sync/1.0 (Vercel Serverless)',
+                    'Accept': 'text/csv,text/plain,*/*'
+                } 
+            });
+
+            if (btiResponse.ok) {
+                break; // Success! Exit the retry loop.
+            }
+
+            attempt++;
+            log.push(`Warning: BTI returned HTTP status ${btiResponse.status}.`);
+            
+            if (attempt < maxRetries) {
+                const waitTime = attempt * 3000; // Wait 3 seconds, then 6 seconds...
+                log.push(`Waiting ${waitTime / 1000} seconds before retrying...`);
+                await sleep(waitTime); 
+            }
+        }
+
+        // If it still fails after all retries, throw the error to trigger the email
+        if (!btiResponse.ok) {
+            throw new Error(`BTI connection failed after ${maxRetries} attempts. Final status: ${btiResponse.status}`);
+        }
+
         const csvText = await btiResponse.text();
         const records = parse(csvText, { columns: true, skip_empty_lines: true });
         const btiDataMap = new Map(records.map(r => [r.id, {
