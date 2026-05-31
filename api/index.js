@@ -73,9 +73,11 @@ module.exports = async (req, res) => {
             }
         }
 
-        // If it still fails after all retries, throw the error to trigger the email
+        // If it still fails after all retries, capture the error page text and throw the error
         if (!btiResponse.ok) {
-            throw new Error(`BTI connection failed after ${maxRetries} attempts. Final status: ${btiResponse.status}`);
+            const errorHtml = await btiResponse.text();
+            console.error("[BTI 503 RESPONSE BODY]:", errorHtml.substring(0, 1000)); // Log the first 1000 chars
+            throw new Error(`BTI connection failed after ${maxRetries} attempts. Final status: ${btiResponse.status}. See logs for response body.`);
         }
 
         const csvText = await btiResponse.text();
