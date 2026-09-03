@@ -101,15 +101,13 @@ module.exports = async (req, res) => {
 
         for (const variant of shopifyVariants) {
             const btiPartNumber = variant.btiPartNumber.value;
+            const btiPartNumberId = variant.btiPartNumber.id; // We now have the Metafield ID
             const variantIdentifier = `${variant.product.title} - ${variant.title}`;
             
             let btiData = btiDataMap.get(btiPartNumber);
             
-            // --- NEW LOGIC: Handle discontinued/missing BTI parts ---
+            // --- MISSING PART LOGIC ---
             if (!btiData) {
-                // The item is no longer in the BTI feed (likely discontinued/dropped).
-                // We mock an out-of-stock object so it correctly updates Shopify to DENY orders
-                // while safely skipping the pricing logic block below.
                 btiData = {
                     available: 0,
                     cost: 0,
@@ -124,33 +122,36 @@ module.exports = async (req, res) => {
             let hasUpdateOccurred = false;
 
             const btiMonitorActive = variant.btiMonitor?.value === 'true';
-            console.log(`[DEBUG] ${variantIdentifier} | Watcher: ${isManagedByWatcher} | Metafield: ${variant.btiMonitor?.value} | Calculated Active: ${btiMonitorActive}`);
-
-            // --- AUTHORITY CHECK ---
+            
             if (isManagedByWatcher && !btiMonitorActive) {
                 console.log(`[AUTH] Skipping ${variantIdentifier} - Authority yielded to Vendor Watcher.`);
                 continue; 
             }
 
-            console.log(`[AUTH] Processing ${variantIdentifier} - Authority held by BTI (Watcher Managed: ${isManagedByWatcher}, BTI Monitor: ${btiMonitorActive})`);
+            // --- DISCONNECT DISCONTINUED PARTS ---
+            // If BTI dropped the part, we sever the connection to prevent loop-locking
+            const forceDeny = btiData.isDiscontinued;
+            
+            if (forceDeny && btiPartNumberId) {
+                await deleteMetafield(btiPartNumberId);
+                console.log(`[UNLINK] Deleted BTI part number ${btiPartNumber} from Shopify for ${variantIdentifier}.`);
+                changesMade.availability.push({ name: variantIdentifier, action: `Unlinked Discontinued BTI Part (${btiPartNumber})` });
+                hasUpdateOccurred = true;
+            }
 
-            // --- AVAILABILITY LOGIC (Always Sync, OR Logic) ---
+            // --- AVAILABILITY LOGIC ---
             const shopifyStock = variant.inventoryQuantity;
             const isTrulyOutOfStock = shopifyStock <= 0 && btiData.available <= 0;
             const isCurrentlySetToContinueSelling = variant.inventoryPolicy === 'CONTINUE';
-            
-            // Safety override: If BTI has completely removed the item, we must NEVER allow backorders (CONTINUE).
-            const forceDeny = btiData.isDiscontinued;
 
             if (variant.product.outOfStockAction?.value === 'Make Unavailable (Track Inventory)' || !variant.product.outOfStockAction?.value) {
                 if ((isTrulyOutOfStock || forceDeny) && isCurrentlySetToContinueSelling) {
                     await updateVariantInventoryPolicy(variant.id, 'DENY');
-                    const actionText = forceDeny ? 'Made Unavailable (Discontinued by BTI)' : 'Made Unavailable';
-                    changesMade.availability.push({ name: variantIdentifier, action: actionText });
+                    const actionText = forceDeny ? 'Made Unavailable (Discontinued)' : 'Made Unavailable';
+                    // Prevent duplicate reporting if we already reported the unlink above
+                    if (!forceDeny) changesMade.availability.push({ name: variantIdentifier, action: actionText });
                     hasUpdateOccurred = true;
                 } else if (!isTrulyOutOfStock && !isCurrentlySetToContinueSelling && !forceDeny) {
-                    // This block only runs if forceDeny is false. It protects us from re-enabling
-                    // CONTINUE on discontinued items even if we have 1 physical unit left in stock.
                     await updateVariantInventoryPolicy(variant.id, 'CONTINUE');
                     changesMade.availability.push({ name: variantIdentifier, action: 'Made Available' });
                     hasUpdateOccurred = true;
@@ -158,8 +159,6 @@ module.exports = async (req, res) => {
             }
 
             // --- PRICING LOGIC ---
-            // If the item is missing (mocked), msrp and cost are 0, so it safely skips this block
-            // preventing the script from accidentally making the price $0.00.
             if (btiData.msrp > 0 && btiData.cost > 0) {
                 let newPrice; 
                 let newCompareAtPrice;
@@ -264,7 +263,7 @@ async function getBtiLinkedShopifyVariants() {
           node {
             id, title, price, compareAtPrice, inventoryQuantity, inventoryPolicy
             inventoryItem { id, unitCost { amount } }
-            btiPartNumber: metafield(namespace: "custom", key: "bti_part_number") { value }
+            btiPartNumber: metafield(namespace: "custom", key: "bti_part_number") { id, value }
             btiMonitor: metafield(namespace: "custom", key: "bti_sync_authority") { value }
             product {
               id, title
@@ -291,6 +290,23 @@ async function getBtiLinkedShopifyVariants() {
         }
     } while (hasNextPage);
     return allVariants.filter(variant => variant.btiPartNumber && variant.btiPartNumber.value);
+}
+
+// NEW FUNCTION: Uses GraphQL to delete the BTI part number metafield entirely
+async function deleteMetafield(metafieldGid) {
+    const client = new shopify.clients.Graphql({ session: getSession() });
+    const mutation = `
+        mutation metafieldDelete($input: MetafieldDeleteInput!) {
+            metafieldDelete(input: $input) {
+                deletedId
+                userErrors {
+                    field
+                    message
+                }
+            }
+        }
+    `;
+    await client.request(mutation, { variables: { input: { id: metafieldGid } } });
 }
 
 async function updateVariantInventoryPolicy(variantGid, policy) {
