@@ -23,7 +23,7 @@ const shopify = shopifyApi.shopifyApi({
   apiKey: 'temp_key', apiSecretKey: 'temp_secret',
   scopes: ['read_products', 'write_products', 'write_inventory'],
   hostName: SHOPIFY_STORE_DOMAIN.replace('https://', ''),
-  apiVersion: '2024-04',
+  apiVersion: '2025-10', // <-- UPDATED to current supported version
   isEmbeddedApp: false, isCustomStoreApp: true,
   adminApiAccessToken: SHOPIFY_ADMIN_API_TOKEN,
 });
@@ -101,7 +101,6 @@ module.exports = async (req, res) => {
 
         for (const variant of shopifyVariants) {
             const btiPartNumber = variant.btiPartNumber.value;
-            const btiPartNumberId = variant.btiPartNumber.id; // We now have the Metafield ID
             const variantIdentifier = `${variant.product.title} - ${variant.title}`;
             
             let btiData = btiDataMap.get(btiPartNumber);
@@ -129,11 +128,11 @@ module.exports = async (req, res) => {
             }
 
             // --- DISCONNECT DISCONTINUED PARTS ---
-            // If BTI dropped the part, we sever the connection to prevent loop-locking
             const forceDeny = btiData.isDiscontinued;
             
-            if (forceDeny && btiPartNumberId) {
-                await deleteMetafield(btiPartNumberId);
+            if (forceDeny) {
+                // Pass the Variant ID, not the Metafield ID, for the modern API
+                await deleteMetafield(variant.id); 
                 console.log(`[UNLINK] Deleted BTI part number ${btiPartNumber} from Shopify for ${variantIdentifier}.`);
                 changesMade.availability.push({ name: variantIdentifier, action: `Unlinked Discontinued BTI Part (${btiPartNumber})` });
                 hasUpdateOccurred = true;
@@ -147,8 +146,8 @@ module.exports = async (req, res) => {
             if (variant.product.outOfStockAction?.value === 'Make Unavailable (Track Inventory)' || !variant.product.outOfStockAction?.value) {
                 if ((isTrulyOutOfStock || forceDeny) && isCurrentlySetToContinueSelling) {
                     await updateVariantInventoryPolicy(variant.id, 'DENY');
-                    const actionText = forceDeny ? 'Made Unavailable (Discontinued)' : 'Made Unavailable';
-                    // Prevent duplicate reporting if we already reported the unlink above
+                    const actionText = forceDeny ? 'Made Unavailable (Discontinued by BTI)' : 'Made Unavailable';
+                    // Prevent duplicate reporting in the email if we already reported the unlink
                     if (!forceDeny) changesMade.availability.push({ name: variantIdentifier, action: actionText });
                     hasUpdateOccurred = true;
                 } else if (!isTrulyOutOfStock && !isCurrentlySetToContinueSelling && !forceDeny) {
@@ -292,13 +291,17 @@ async function getBtiLinkedShopifyVariants() {
     return allVariants.filter(variant => variant.btiPartNumber && variant.btiPartNumber.value);
 }
 
-// NEW FUNCTION: Uses GraphQL to delete the BTI part number metafield entirely
-async function deleteMetafield(metafieldGid) {
+// MODERNIZED FUNCTION: Uses GraphQL metafieldsDelete to unlink the part number
+async function deleteMetafield(variantGid) {
     const client = new shopify.clients.Graphql({ session: getSession() });
     const mutation = `
-        mutation metafieldDelete($input: MetafieldDeleteInput!) {
-            metafieldDelete(input: $input) {
-                deletedId
+        mutation metafieldsDelete($metafields: [MetafieldIdentifierInput!]!) {
+            metafieldsDelete(metafields: $metafields) {
+                deletedMetafields {
+                    key
+                    namespace
+                    ownerId
+                }
                 userErrors {
                     field
                     message
@@ -306,7 +309,16 @@ async function deleteMetafield(metafieldGid) {
             }
         }
     `;
-    await client.request(mutation, { variables: { input: { id: metafieldGid } } });
+    const variables = {
+        metafields: [
+            {
+                ownerId: variantGid,
+                namespace: "custom",
+                key: "bti_part_number"
+            }
+        ]
+    };
+    await client.request(mutation, { variables });
 }
 
 async function updateVariantInventoryPolicy(variantGid, policy) {
