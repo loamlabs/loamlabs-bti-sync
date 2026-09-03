@@ -3,7 +3,7 @@ const shopifyApi = require('@shopify/shopify-api');
 require('@shopify/shopify-api/adapters/node');
 const { Resend } = require('resend');
 const { parse } = require('csv-parse/sync');
-const util = require('util'); // <-- THIS LINE FIXES THE ERROR
+const util = require('util'); 
 const { createClient } = require('@supabase/supabase-js');
 
 // --- DATABASE CONFIGURATION ---
@@ -53,7 +53,6 @@ module.exports = async (req, res) => {
             btiResponse = await fetch(BTI_FULL_DATA_URL, { 
                 headers: { 
                     'Authorization': `Basic ${btiCredentials}`,
-                    // Added headers to prevent anti-bot WAFs from blocking the request with a 503
                     'User-Agent': 'LoamLabs-BTI-Sync/1.0 (Vercel Serverless)',
                     'Accept': 'text/csv,text/plain,*/*'
                 } 
@@ -67,16 +66,15 @@ module.exports = async (req, res) => {
             log.push(`Warning: BTI returned HTTP status ${btiResponse.status}.`);
             
             if (attempt < maxRetries) {
-                const waitTime = attempt * 3000; // Wait 3 seconds, then 6 seconds...
+                const waitTime = attempt * 3000; 
                 log.push(`Waiting ${waitTime / 1000} seconds before retrying...`);
                 await sleep(waitTime); 
             }
         }
 
-        // If it still fails after all retries, capture the error page text and throw the error
         if (!btiResponse.ok) {
             const errorHtml = await btiResponse.text();
-            console.error("[BTI 503 RESPONSE BODY]:", errorHtml.substring(0, 1000)); // Log the first 1000 chars
+            console.error("[BTI 503 RESPONSE BODY]:", errorHtml.substring(0, 1000));
             throw new Error(`BTI connection failed after ${maxRetries} attempts. Final status: ${btiResponse.status}. See logs for response body.`);
         }
 
@@ -103,10 +101,24 @@ module.exports = async (req, res) => {
 
         for (const variant of shopifyVariants) {
             const btiPartNumber = variant.btiPartNumber.value;
-            const btiData = btiDataMap.get(btiPartNumber);
-            if (!btiData) continue;
-            
             const variantIdentifier = `${variant.product.title} - ${variant.title}`;
+            
+            let btiData = btiDataMap.get(btiPartNumber);
+            
+            // --- NEW LOGIC: Handle discontinued/missing BTI parts ---
+            if (!btiData) {
+                // The item is no longer in the BTI feed (likely discontinued/dropped).
+                // We mock an out-of-stock object so it correctly updates Shopify to DENY orders
+                // while safely skipping the pricing logic block below.
+                btiData = {
+                    available: 0,
+                    cost: 0,
+                    msrp: 0,
+                    isDiscontinued: true
+                };
+                console.log(`[WARNING] BTI Part ${btiPartNumber} missing from feed for ${variantIdentifier}. Flagging as discontinued.`);
+            }
+
             const numericVariantId = variant.id.split('/').pop();
             const isManagedByWatcher = watcherManagedSet.has(numericVariantId);
             let hasUpdateOccurred = false;
@@ -126,12 +138,19 @@ module.exports = async (req, res) => {
             const shopifyStock = variant.inventoryQuantity;
             const isTrulyOutOfStock = shopifyStock <= 0 && btiData.available <= 0;
             const isCurrentlySetToContinueSelling = variant.inventoryPolicy === 'CONTINUE';
+            
+            // Safety override: If BTI has completely removed the item, we must NEVER allow backorders (CONTINUE).
+            const forceDeny = btiData.isDiscontinued;
+
             if (variant.product.outOfStockAction?.value === 'Make Unavailable (Track Inventory)' || !variant.product.outOfStockAction?.value) {
-                if (isTrulyOutOfStock && isCurrentlySetToContinueSelling) {
+                if ((isTrulyOutOfStock || forceDeny) && isCurrentlySetToContinueSelling) {
                     await updateVariantInventoryPolicy(variant.id, 'DENY');
-                    changesMade.availability.push({ name: variantIdentifier, action: 'Made Unavailable' });
+                    const actionText = forceDeny ? 'Made Unavailable (Discontinued by BTI)' : 'Made Unavailable';
+                    changesMade.availability.push({ name: variantIdentifier, action: actionText });
                     hasUpdateOccurred = true;
-                } else if (!isTrulyOutOfStock && !isCurrentlySetToContinueSelling) {
+                } else if (!isTrulyOutOfStock && !isCurrentlySetToContinueSelling && !forceDeny) {
+                    // This block only runs if forceDeny is false. It protects us from re-enabling
+                    // CONTINUE on discontinued items even if we have 1 physical unit left in stock.
                     await updateVariantInventoryPolicy(variant.id, 'CONTINUE');
                     changesMade.availability.push({ name: variantIdentifier, action: 'Made Available' });
                     hasUpdateOccurred = true;
@@ -139,33 +158,27 @@ module.exports = async (req, res) => {
             }
 
             // --- PRICING LOGIC ---
+            // If the item is missing (mocked), msrp and cost are 0, so it safely skips this block
+            // preventing the script from accidentally making the price $0.00.
             if (btiData.msrp > 0 && btiData.cost > 0) {
                 let newPrice; 
                 let newCompareAtPrice;
                 
-                // 1. Calculate the Target Sale Price
                 const priceAdjustmentPct = variant.product.priceAdjustmentPercentage?.value;
                 if (priceAdjustmentPct != null) {
                     const adjustment = 1 + (parseInt(priceAdjustmentPct, 10) / 100);
                     newPrice = (btiData.msrp * adjustment).toFixed(2);
                 } else {
-                    // Default: 1% off MSRP if no custom percentage is provided
                     newPrice = (btiData.msrp * 0.99).toFixed(2);
                 }
 
-                // 2. Preserve the "Sale Badge" Gap
                 const currentPrice = parseFloat(variant.price);
                 const currentCompare = variant.compareAtPrice ? parseFloat(variant.compareAtPrice) : 0;
 
                 if (currentCompare > currentPrice) {
-                    // There is an active sale gap (e.g., your price is $5 lower than MSRP)
                     const gap = currentCompare - currentPrice;
-                    // Apply that same gap to the new calculated price
                     newCompareAtPrice = (parseFloat(newPrice) + gap).toFixed(2);
                 } else {
-                    // No sale was active. 
-                    // If no custom % is set, default to MSRP as the compare-at price
-                    // If a custom % IS set, keep prices equal (full price)
                     newCompareAtPrice = (priceAdjustmentPct != null) ? newPrice : btiData.msrp.toFixed(2);
                 }
 
@@ -184,10 +197,9 @@ module.exports = async (req, res) => {
                 }
             }
 
-            // If an API call was made for this variant, PAUSE to respect the rate limit.
             if (hasUpdateOccurred) {
                 updatesPerformedCount++;
-                await sleep(550); // Pause for 550 milliseconds
+                await sleep(550); 
             }
         }
         
@@ -275,7 +287,7 @@ async function getBtiLinkedShopifyVariants() {
         hasNextPage = pageData.pageInfo.hasNextPage;
         cursor = pageData.pageInfo.endCursor;
         if (hasNextPage) {
-            await sleep(1000); // Wait 1s to allow Shopify's GraphQL rate bucket to refill
+            await sleep(1000); 
         }
     } while (hasNextPage);
     return allVariants.filter(variant => variant.btiPartNumber && variant.btiPartNumber.value);
@@ -290,13 +302,11 @@ async function updateVariantInventoryPolicy(variantGid, policy) {
     });
 }
 
-// --- THIS IS THE FINAL, CORRECTED FUNCTION ---
 async function updateVariantPricing(variantGid, price, compareAtPrice, cost, inventoryItemId) {
     const client = new shopify.clients.Rest({ session: getSession() });
     const numericVariantId = variantGid.split('/').pop();
     const numericInventoryItemId = inventoryItemId ? inventoryItemId.split('/').pop() : null;
 
-    // API Call 1: Update price and compare_at_price on the variant
     await client.put({
         path: `variants/${numericVariantId}.json`,
         data: {
@@ -308,7 +318,6 @@ async function updateVariantPricing(variantGid, price, compareAtPrice, cost, inv
         }
     });
 
-    // API Call 2: Update cost on the separate inventory_item endpoint
     if (cost && numericInventoryItemId) {
         await client.put({
             path: `inventory_items/${numericInventoryItemId}.json`,
