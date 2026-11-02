@@ -3,7 +3,8 @@ const shopifyApi = require('@shopify/shopify-api');
 require('@shopify/shopify-api/adapters/node');
 const { Resend } = require('resend');
 const { parse } = require('csv-parse/sync');
-const util = require('util'); 
+const util = require('util');
+const { planVariant, isRealPartNumber } = require('../lib/plan-variant');
 const { createClient } = require('@supabase/supabase-js');
 
 // --- DATABASE CONFIGURATION ---
@@ -36,7 +37,7 @@ module.exports = async (req, res) => {
     const log = ["BTI Sync Started..."];
     let status = 200;
     let message = "Sync completed successfully.";
-    const changesMade = { availability: [], pricing: [] };
+    const changesMade = { availability: [], pricing: [], costOnly: [], notices: [] };
 
     try {
         log.push("Fetching FULL inventory and price data from BTI...");
@@ -90,7 +91,7 @@ module.exports = async (req, res) => {
         log.push("Fetching Watcher Managed Registry to check for pricing conflicts...");
         const { data: watcherRules } = await supabase.from('watcher_rules').select('shopify_variant_id').not('vendor_url', 'is', null);
         const watcherManagedSet = new Set(watcherRules?.map(r => String(r.shopify_variant_id)) || []);
-        log.push(`Found ${watcherManagedSet.size} items managed by Vendor Watcher (Price Authority).`);
+        log.push(`Found ${watcherManagedSet.size} variants with a Vendor Watcher rule. BTI skips them unless custom.bti_sync_authority is true, never changes their price or compare-at, and never deletes their part number.`);
 
         log.push("Fetching all Shopify variants with a BTI part number...");
         const shopifyVariants = await getBtiLinkedShopifyVariants();
@@ -99,112 +100,81 @@ module.exports = async (req, res) => {
         let updatesPerformedCount = 0;
         log.push("Processing variants sequentially to respect API rate limits...");
 
+        let skippedIgnoreCount = 0;
         for (const variant of shopifyVariants) {
             const btiPartNumber = variant.btiPartNumber.value;
             const variantIdentifier = `${variant.product.title} - ${variant.title}`;
-            
-            let btiData = btiDataMap.get(btiPartNumber);
-            
-            // --- MISSING PART LOGIC ---
-            if (!btiData) {
-                btiData = {
-                    available: 0,
-                    cost: 0,
-                    msrp: 0,
-                    isDiscontinued: true
-                };
-                console.log(`[WARNING] BTI Part ${btiPartNumber} missing from feed for ${variantIdentifier}. Flagging as discontinued.`);
-            }
-
             const numericVariantId = variant.id.split('/').pop();
             const isManagedByWatcher = watcherManagedSet.has(numericVariantId);
+            const btiMonitorActive = variant.btiMonitor?.value === 'true';
             let hasUpdateOccurred = false;
 
-            const btiMonitorActive = variant.btiMonitor?.value === 'true';
-            
-            if (isManagedByWatcher && !btiMonitorActive) {
-                console.log(`[AUTH] Skipping ${variantIdentifier} - Authority yielded to Vendor Watcher.`);
-                continue; 
-            }
+            // All decisions live in lib/plan-variant.js (pure, unit tested). This loop only performs the planned writes.
+            const plan = planVariant({
+                variant: {
+                    btiPartNumber,
+                    inventoryQuantity: variant.inventoryQuantity,
+                    inventoryPolicy: variant.inventoryPolicy,
+                    price: variant.price,
+                    compareAtPrice: variant.compareAtPrice,
+                    unitCostAmount: variant.inventoryItem.unitCost ? variant.inventoryItem.unitCost.amount : null,
+                    outOfStockAction: variant.product.outOfStockAction?.value || null,
+                    priceAdjustmentPct: variant.product.priceAdjustmentPercentage?.value ?? null,
+                },
+                btiData: btiDataMap.get(btiPartNumber),
+                isManagedByWatcher,
+                btiMonitorActive,
+            });
 
-            // --- DISCONNECT DISCONTINUED PARTS ---
-            const forceDeny = btiData.isDiscontinued;
-            
-            if (forceDeny) {
-                // Pass the Variant ID, not the Metafield ID, for the modern API
-                await deleteMetafield(variant.id); 
+            if (plan.skip) {
+                if (!isRealPartNumber(btiPartNumber)) skippedIgnoreCount++;
+                console.log(`[SKIP] ${variantIdentifier}: ${plan.skip}`);
+                continue;
+            }
+            if (plan.notice) {
+                console.log(`[NOTICE] ${variantIdentifier}: ${plan.notice}`);
+                changesMade.notices.push({ name: variantIdentifier, text: plan.notice });
+            }
+            if (plan.deleteNumber) {
+                await deleteMetafield(variant.id);
                 console.log(`[UNLINK] Deleted BTI part number ${btiPartNumber} from Shopify for ${variantIdentifier}.`);
                 changesMade.availability.push({ name: variantIdentifier, action: `Unlinked Discontinued BTI Part (${btiPartNumber})` });
                 hasUpdateOccurred = true;
             }
-
-            // --- AVAILABILITY LOGIC ---
-            const shopifyStock = variant.inventoryQuantity;
-            const isTrulyOutOfStock = shopifyStock <= 0 && btiData.available <= 0;
-            const isCurrentlySetToContinueSelling = variant.inventoryPolicy === 'CONTINUE';
-
-            if (variant.product.outOfStockAction?.value === 'Make Unavailable (Track Inventory)' || !variant.product.outOfStockAction?.value) {
-                if ((isTrulyOutOfStock || forceDeny) && isCurrentlySetToContinueSelling) {
-                    await updateVariantInventoryPolicy(variant.id, 'DENY');
-                    const actionText = forceDeny ? 'Made Unavailable (Discontinued by BTI)' : 'Made Unavailable';
-                    // Prevent duplicate reporting in the email if we already reported the unlink
-                    if (!forceDeny) changesMade.availability.push({ name: variantIdentifier, action: actionText });
-                    hasUpdateOccurred = true;
-                } else if (!isTrulyOutOfStock && !isCurrentlySetToContinueSelling && !forceDeny) {
-                    await updateVariantInventoryPolicy(variant.id, 'CONTINUE');
-                    changesMade.availability.push({ name: variantIdentifier, action: 'Made Available' });
-                    hasUpdateOccurred = true;
-                }
+            if (plan.policy) {
+                await updateVariantInventoryPolicy(variant.id, plan.policy);
+                if (plan.availabilityText) changesMade.availability.push({ name: variantIdentifier, action: plan.availabilityText });
+                hasUpdateOccurred = true;
             }
-
-            // --- PRICING LOGIC ---
-            if (btiData.msrp > 0 && btiData.cost > 0) {
-                let newPrice; 
-                let newCompareAtPrice;
-                
-                const priceAdjustmentPct = variant.product.priceAdjustmentPercentage?.value;
-                if (priceAdjustmentPct != null) {
-                    const adjustment = 1 + (parseInt(priceAdjustmentPct, 10) / 100);
-                    newPrice = (btiData.msrp * adjustment).toFixed(2);
-                } else {
-                    newPrice = (btiData.msrp * 0.99).toFixed(2);
-                }
-
-                const currentPrice = parseFloat(variant.price);
-                const currentCompare = variant.compareAtPrice ? parseFloat(variant.compareAtPrice) : 0;
-
-                if (currentCompare > currentPrice) {
-                    const gap = currentCompare - currentPrice;
-                    newCompareAtPrice = (parseFloat(newPrice) + gap).toFixed(2);
-                } else {
-                    newCompareAtPrice = (priceAdjustmentPct != null) ? newPrice : btiData.msrp.toFixed(2);
-                }
-
-                const newCost = btiData.cost.toFixed(2);
+            if (plan.pricing) {
                 const currentCost = variant.inventoryItem.unitCost ? parseFloat(variant.inventoryItem.unitCost.amount).toFixed(2) : null;
-                
-                if (newPrice !== variant.price || newCompareAtPrice !== variant.compareAtPrice || newCost !== currentCost) {
-                    await updateVariantPricing(variant.id, newPrice, newCompareAtPrice, newCost, variant.inventoryItem.id);
-                    changesMade.pricing.push({ 
-                        name: variantIdentifier, 
-                        oldPrice: variant.price, newPrice: newPrice, 
-                        oldCompareAt: variant.compareAtPrice, newCompareAt: newCompareAtPrice,
-                        oldCost: currentCost, newCost: newCost 
+                if (plan.pricing.costOnly) {
+                    await updateInventoryCost(variant.inventoryItem.id, plan.pricing.cost);
+                    changesMade.costOnly.push({ name: variantIdentifier, oldCost: currentCost, newCost: plan.pricing.cost });
+                } else {
+                    await updateVariantPricing(variant.id, plan.pricing.price, plan.pricing.compareAt, plan.pricing.cost, variant.inventoryItem.id);
+                    changesMade.pricing.push({
+                        name: variantIdentifier,
+                        oldPrice: variant.price, newPrice: plan.pricing.price,
+                        oldCompareAt: variant.compareAtPrice, newCompareAt: plan.pricing.compareAt,
+                        oldCost: currentCost, newCost: plan.pricing.cost
                     });
-                    hasUpdateOccurred = true;
                 }
+                hasUpdateOccurred = true;
             }
 
             if (hasUpdateOccurred) {
                 updatesPerformedCount++;
-                await sleep(550); 
+                await sleep(550);
             }
         }
-        
+        if (skippedIgnoreCount > 0) log.push(`Skipped ${skippedIgnoreCount} variants whose part number is blank or IGNORE (not treated as discontinued).`);
+
         log.push(`All variants processed. ${updatesPerformedCount} updates were performed sequentially.`);
 
-        const totalChanges = changesMade.availability.length + changesMade.pricing.length;
-        if (totalChanges > 0) {
+        const totalChanges = changesMade.availability.length + changesMade.pricing.length + changesMade.costOnly.length;
+        const noticeCount = changesMade.notices.length;
+        if (totalChanges > 0 || noticeCount > 0) {
             let reportHtml = `<h1>BTI Inventory & Price Sync Report</h1>`;
             if (changesMade.availability.length > 0) { reportHtml += `<h2>Availability Updates (${changesMade.availability.length})</h2><ul>${changesMade.availability.map(c => `<li><b>${c.name}</b>: ${c.action}</li>`).join('')}</ul>`; }
             if (changesMade.pricing.length > 0) {
@@ -229,7 +199,9 @@ module.exports = async (req, res) => {
                 });
                 reportHtml += `</tbody></table>`;
             }
-            await resend.emails.send({ from: 'LoamLabs BTI Sync <info@loamlabsusa.com>', to: REPORT_EMAIL_TO, subject: `BTI Sync Report: ${totalChanges} Updates Made`, html: reportHtml, });
+            if (changesMade.costOnly.length > 0) { reportHtml += `<h2>Cost Updates on Watcher-Managed Items (${changesMade.costOnly.length})</h2><ul>${changesMade.costOnly.map(c => `<li><b>${c.name}</b>: cost $${c.oldCost || 'N/A'} → $${c.newCost} (price is owned by the Vendor Watcher)</li>`).join('')}</ul>`; }
+            if (noticeCount > 0) { reportHtml += `<h2>Needs a Look (${noticeCount})</h2><ul>${changesMade.notices.map(n => `<li><b>${n.name}</b>: ${n.text}</li>`).join('')}</ul>`; }
+            await resend.emails.send({ from: 'LoamLabs BTI Sync <info@loamlabsusa.com>', to: REPORT_EMAIL_TO, subject: `BTI Sync Report: ${totalChanges} Updates Made${noticeCount > 0 ? `, ${noticeCount} To Check` : ''}`, html: reportHtml, });
             log.push("Sync report email sent successfully.");
         } else {
             log.push("Sync complete. No changes were needed.");
@@ -327,6 +299,15 @@ async function updateVariantInventoryPolicy(variantGid, policy) {
     await client.put({
         path: `variants/${numericVariantId}.json`,
         data: { variant: { id: numericVariantId, inventory_policy: policy.toLowerCase() } }
+    });
+}
+
+async function updateInventoryCost(inventoryItemGid, cost) {
+    const client = new shopify.clients.Rest({ session: getSession() });
+    const numericInventoryItemId = inventoryItemGid.split('/').pop();
+    await client.put({
+        path: `inventory_items/${numericInventoryItemId}.json`,
+        data: { inventory_item: { id: numericInventoryItemId, cost: cost } }
     });
 }
 

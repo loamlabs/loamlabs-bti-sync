@@ -4,7 +4,8 @@
   "description": "Syncs Shopify product status with BTI distributor inventory.",
   "main": "api/index.js",
   "scripts": {
-    "start": "node api/index.js"
+    "start": "node api/index.js",
+    "test": "node --test tests/plan-variant.test.js"
   },
   "dependencies": {
     "@shopify/shopify-api": "9.3.2",
