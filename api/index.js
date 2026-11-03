@@ -5,6 +5,7 @@ const { Resend } = require('resend');
 const { parse } = require('csv-parse/sync');
 const util = require('util');
 const { planVariant, isRealPartNumber } = require('../lib/plan-variant');
+const { fetchWatcherManagedSet } = require('../lib/watcher-managed');
 const { createClient } = require('@supabase/supabase-js');
 
 // --- DATABASE CONFIGURATION ---
@@ -89,8 +90,7 @@ module.exports = async (req, res) => {
         log.push(`Successfully parsed ${btiDataMap.size} items from BTI feed.`);
 
         log.push("Fetching Watcher Managed Registry to check for pricing conflicts...");
-        const { data: watcherRules } = await supabase.from('watcher_rules').select('shopify_variant_id').not('vendor_url', 'is', null);
-        const watcherManagedSet = new Set(watcherRules?.map(r => String(r.shopify_variant_id)) || []);
+        const watcherManagedSet = await fetchWatcherManagedSet(supabase); // pages past Supabase's 1,000-row cap; throws rather than return a partial list
         log.push(`Found ${watcherManagedSet.size} variants with a Vendor Watcher rule. BTI skips them unless custom.bti_sync_authority is true, never changes their price or compare-at, and never deletes their part number.`);
 
         log.push("Fetching all Shopify variants with a BTI part number...");
