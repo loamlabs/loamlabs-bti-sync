@@ -26,7 +26,7 @@ test('reasons: no-secret-sent / wrong-secret', () => {
 });
 
 test('phase 2: no secret configured on the server -> 503, even if the caller sends something', () => {
-    for (const secret of [undefined, '', '   ']) {
+    for (const secret of [null, '', '   ']) {
         const r = enforced(bearer('anything'), secret);
         assert.equal(r.allowed, false);
         assert.equal(r.status, 503);
@@ -39,12 +39,12 @@ test('phase 1: everything is allowed, but the result still tells what would have
     assert.equal(phase1({}).allowed, true);
     assert.equal(phase1({}).ok, false);
     assert.equal(phase1(bearer('nope')).reason, 'wrong-secret');
-    assert.equal(phase1({}, undefined).reason, 'no-secret-configured');
+    assert.equal(phase1({}, null).reason, 'no-secret-configured');
 });
 
 test('the result never contains the secret or what was sent', () => {
     const sent = 'super-secret-sent-value-999';
-    for (const r of [enforced(bearer(sent)), enforced(bearer(SECRET)), phase1(bearer(sent)), enforced({}, undefined)]) {
+    for (const r of [enforced(bearer(sent)), enforced(bearer(SECRET)), phase1(bearer(sent)), enforced({}, null)]) {
         const text = JSON.stringify(r);
         assert.ok(!text.includes(sent) && !text.includes(SECRET));
     }
