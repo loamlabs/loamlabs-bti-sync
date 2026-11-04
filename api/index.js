@@ -6,6 +6,7 @@ const { parse } = require('csv-parse/sync');
 const util = require('util');
 const { planVariant, isRealPartNumber } = require('../lib/plan-variant');
 const { fetchWatcherManagedSet } = require('../lib/watcher-managed');
+const { checkAuth } = require('../lib/auth');
 const { createClient } = require('@supabase/supabase-js');
 
 // --- DATABASE CONFIGURATION ---
@@ -34,6 +35,11 @@ const BTI_FULL_DATA_URL = 'https://www.bti-usa.com/inventory?full=true';
 
 // The main sync function
 module.exports = async (req, res) => {
+    // Lock: decided before any work. Only a reason code is logged, never the secret or what was sent.
+    const auth = checkAuth({ headers: req.headers, secret: process.env.CRON_SECRET });
+    console.log(`[AUTH] ${auth.allowed ? (auth.ok ? 'allowed' : 'allowed (phase 1, not enforced)') : 'rejected'}: ${auth.reason}`);
+    if (!auth.allowed) return res.status(auth.status).json({ error: auth.status === 503 ? 'NOT_CONFIGURED' : 'Unauthorized' });
+
     console.log("BTI full sync (inventory & price) function triggered...");
     const log = ["BTI Sync Started..."];
     let status = 200;
