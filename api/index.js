@@ -7,6 +7,7 @@ const util = require('util');
 const { planVariant, isRealPartNumber } = require('../lib/plan-variant');
 const { fetchWatcherManagedSet } = require('../lib/watcher-managed');
 const { checkAuth } = require('../lib/auth');
+const { checkFeed, FeedCheckError, readPreviousCount, recordCount } = require('../lib/feed-check');
 const { createClient } = require('@supabase/supabase-js');
 
 // --- DATABASE CONFIGURATION ---
@@ -103,6 +104,31 @@ module.exports = async (req, res) => {
         const shopifyVariants = await getBtiLinkedShopifyVariants();
         log.push(`Found ${shopifyVariants.length} Shopify variants to process.`);
 
+        // The same planning the loop below uses (pure, writes nothing), also used by the feed check.
+        const planFor = (variant) => planVariant({
+            variant: {
+                btiPartNumber: variant.btiPartNumber.value,
+                inventoryQuantity: variant.inventoryQuantity,
+                inventoryPolicy: variant.inventoryPolicy,
+                price: variant.price,
+                compareAtPrice: variant.compareAtPrice,
+                unitCostAmount: variant.inventoryItem.unitCost ? variant.inventoryItem.unitCost.amount : null,
+                outOfStockAction: variant.product.outOfStockAction?.value || null,
+                priceAdjustmentPct: variant.product.priceAdjustmentPercentage?.value ?? null,
+            },
+            btiData: btiDataMap.get(variant.btiPartNumber.value),
+            isManagedByWatcher: watcherManagedSet.has(variant.id.split('/').pop()),
+            btiMonitorActive: variant.btiMonitor?.value === 'true',
+        });
+
+        // FEED CHECK, before any write: a truncated or empty feed would unlink and close every part that is "missing" from it.
+        const plannedUnlinks = shopifyVariants.reduce((n, v) => n + (planFor(v).deleteNumber ? 1 : 0), 0);
+        const previousCount = await readPreviousCount(supabase);
+        const verdict = checkFeed({ count: btiDataMap.size, previous: previousCount, plannedUnlinks, linked: shopifyVariants.length });
+        if (!verdict.ok) throw new FeedCheckError(verdict.reasons);
+        log.push(`Feed check passed: ${btiDataMap.size} records (previous run: ${previousCount == null ? 'none recorded' : previousCount}), ${plannedUnlinks} planned unlinks.`);
+        await recordCount(supabase, btiDataMap.size);
+
         let updatesPerformedCount = 0;
         log.push("Processing variants sequentially to respect API rate limits...");
 
@@ -116,21 +142,7 @@ module.exports = async (req, res) => {
             let hasUpdateOccurred = false;
 
             // All decisions live in lib/plan-variant.js (pure, unit tested). This loop only performs the planned writes.
-            const plan = planVariant({
-                variant: {
-                    btiPartNumber,
-                    inventoryQuantity: variant.inventoryQuantity,
-                    inventoryPolicy: variant.inventoryPolicy,
-                    price: variant.price,
-                    compareAtPrice: variant.compareAtPrice,
-                    unitCostAmount: variant.inventoryItem.unitCost ? variant.inventoryItem.unitCost.amount : null,
-                    outOfStockAction: variant.product.outOfStockAction?.value || null,
-                    priceAdjustmentPct: variant.product.priceAdjustmentPercentage?.value ?? null,
-                },
-                btiData: btiDataMap.get(btiPartNumber),
-                isManagedByWatcher,
-                btiMonitorActive,
-            });
+            const plan = planFor(variant);
 
             if (plan.skip) {
                 if (!isRealPartNumber(btiPartNumber)) skippedIgnoreCount++;
@@ -223,6 +235,9 @@ module.exports = async (req, res) => {
         log.push(`\n--- ERROR MESSAGE --- \n${error.message}`);
         status = 500;
         message = `Sync failed: ${error.message}`;
+        if (error.feedCheck) {
+            await resend.emails.send({ from: 'LoamLabs BTI Sync <info@loamlabsusa.com>', to: REPORT_EMAIL_TO, subject: 'BTI Sync STOPPED: feed looks truncated, nothing was changed', html: `<h1>BTI feed looks truncated. Nothing was changed.</h1><p>No part number was unlinked and no availability, price or cost was written, because:</p><ul>${error.reasons.map((r) => `<li>${String(r).replace(/</g, '&lt;')}</li>`).join('')}</ul><p>If the feed really is this size today, tell Backend 2 and the limits will be adjusted; otherwise the next run will try again.</p>` });
+        } else
         await resend.emails.send({ from: 'LoamLabs BTI Sync <info@loamlabsusa.com>', to: REPORT_EMAIL_TO, subject: `BTI Sync Failure: ${error.message}`, html: `<h1>BTI Sync Failed</h1><p>The sync process encountered a critical error. Please check the Vercel logs for details.</p><pre>${log.join('\n')}</pre>` });
     }
     
