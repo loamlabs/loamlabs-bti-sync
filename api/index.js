@@ -4,7 +4,7 @@ require('@shopify/shopify-api/adapters/node');
 const { Resend } = require('resend');
 const { parse } = require('csv-parse/sync');
 const util = require('util');
-const { planVariant, isRealPartNumber } = require('../lib/plan-variant');
+const { planVariant, isRealPartNumber, isMonitoringOff } = require('../lib/plan-variant');
 const { fetchWatcherManagedSet } = require('../lib/watcher-managed');
 const { checkAuth } = require('../lib/auth');
 const { checkFeed, FeedCheckError, readPreviousCount, recordCount } = require('../lib/feed-check');
@@ -119,6 +119,7 @@ module.exports = async (req, res) => {
             btiData: btiDataMap.get(variant.btiPartNumber.value),
             isManagedByWatcher: watcherManagedSet.has(variant.id.split('/').pop()),
             btiMonitorActive: variant.btiMonitor?.value === 'true',
+            monitoringOff: isMonitoringOff(variant.product.monitoringProd?.value, variant.monitoringVar?.value),
         });
 
         // FEED CHECK, before any write: a truncated or empty feed would unlink and close every part that is "missing" from it.
@@ -257,10 +258,12 @@ async function getBtiLinkedShopifyVariants() {
             inventoryItem { id, unitCost { amount } }
             btiPartNumber: metafield(namespace: "custom", key: "bti_part_number") { id, value }
             btiMonitor: metafield(namespace: "custom", key: "bti_sync_authority") { value }
+            monitoringVar: metafield(namespace: "custom", key: "inventory_monitoring_enabled") { value }
             product {
               id, title
               outOfStockAction: metafield(namespace: "custom", key: "out_of_stock_action") { value }
               priceAdjustmentPercentage: metafield(namespace: "custom", key: "price_adjustment_percentage") { value }
+              monitoringProd: metafield(namespace: "custom", key: "inventory_monitoring_enabled") { value }
             }
           }
         }
